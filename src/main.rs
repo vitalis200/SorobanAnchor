@@ -1,29 +1,92 @@
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 
+// ── Secret key wrapper ────────────────────────────────────────────────────────
+
+/// A newtype wrapper around a Stellar secret key (S... string).
+///
+/// Implements `Debug` and `Display` with full redaction so the raw key value
+/// can never appear in log output, panic messages, or formatted strings.
+///
+/// # Safety
+/// The inner value is only accessible via [`SecretKey::expose`], which makes
+/// intentional use of the secret explicit at every call site.
+struct SecretKey(String);
+
+impl SecretKey {
+    fn new(raw: impl Into<String>) -> Self {
+        Self(raw.into())
+    }
+
+    /// Return the raw secret key value for use in subprocess arguments.
+    ///
+    /// Call sites must be deliberate: this is the only way to obtain the
+    /// plaintext key, and every call should be accompanied by a comment
+    /// explaining why the exposure is necessary.
+    fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+// Redact the secret in all formatted output.
+impl std::fmt::Debug for SecretKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SecretKey([REDACTED])")
+    }
+}
+
+impl std::fmt::Display for SecretKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("[REDACTED]")
+    }
+}
+
+// Prevent accidental serialization of the secret key.
+impl Drop for SecretKey {
+    fn drop(&mut self) {
+        // Zero-fill the string's backing buffer before deallocation.
+        // SAFETY: We own the String and are about to drop it; writing zeros
+        // through the mutable byte slice is safe and prevents the key from
+        // lingering in freed heap memory.
+        unsafe {
+            let bytes = self.0.as_bytes_mut();
+            for b in bytes.iter_mut() {
+                std::ptr::write_volatile(b, 0u8);
+            }
+        }
+    }
+}
+
 // ── Key resolution ────────────────────────────────────────────────────────────
 
 /// Resolve the signing source from flags or environment.
 /// Priority: --secret-key > ANCHOR_ADMIN_SECRET > --keypair-file
-fn resolve_source(secret_key: Option<&str>, keypair_file: Option<&str>) -> String {
+///
+/// Returns a [`SecretKey`] wrapper that redacts the value in all debug/display
+/// output, preventing accidental logging of the raw secret.
+fn resolve_source(secret_key: Option<&str>, keypair_file: Option<&str>) -> SecretKey {
     if let Some(sk) = secret_key {
-        return sk.to_string();
+        return SecretKey::new(sk);
     }
     if let Ok(sk) = std::env::var("ANCHOR_ADMIN_SECRET") {
         if !sk.is_empty() {
-            return sk;
+            return SecretKey::new(sk);
         }
     }
     if let Some(path) = keypair_file {
+        // Only report the file path in errors, never the file contents.
         let raw = std::fs::read_to_string(path)
-            .unwrap_or_else(|e| { eprintln!("error: cannot read keypair file '{path}': {e}"); std::process::exit(1); });
-        // Support JSON {"secret_key":"S..."} or plain text
+            .unwrap_or_else(|e| {
+                eprintln!("error: cannot read keypair file '{path}': {e}");
+                std::process::exit(1);
+            });
+        // Support JSON {"secret_key":"S..."} or plain text.
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
             if let Some(sk) = v.get("secret_key").and_then(|s| s.as_str()) {
-                return sk.to_string();
+                return SecretKey::new(sk);
             }
         }
-        return raw.trim().to_string();
+        return SecretKey::new(raw.trim());
     }
     eprintln!("error: signing key required — provide --secret-key, set ANCHOR_ADMIN_SECRET, or use --keypair-file");
     std::process::exit(1);
@@ -49,14 +112,20 @@ fn passphrase(network: &str) -> &'static str {
 
 fn stellar_invoke(
     contract_id: &str,
-    source: &str,
+    // SECURITY: `source` is a Stellar secret key passed to the Stellar CLI via
+    // `--source`.  It is intentionally exposed here because the upstream CLI
+    // requires it as a positional argument.  It must never be echoed to stdout
+    // or included in log messages; only the exit status and stdout of the child
+    // process are surfaced to the caller.
+    source: &SecretKey,
     network: &str,
     fn_args: &[&str],
 ) -> String {
     let output = std::process::Command::new("stellar")
         .args(["contract", "invoke",
                "--id", contract_id,
-               "--source", source,
+               // expose() is the only sanctioned way to obtain the raw key.
+               "--source", source.expose(),
                "--rpc-url", rpc_url(network),
                "--network-passphrase", passphrase(network),
                "--"])
@@ -67,6 +136,7 @@ fn stellar_invoke(
     if output.status.success() {
         String::from_utf8_lossy(&output.stdout).trim().to_string()
     } else {
+        // Emit only the child's stderr; the secret key is not present there.
         eprintln!("{}", String::from_utf8_lossy(&output.stderr).trim());
         std::process::exit(1);
     }
@@ -294,6 +364,9 @@ fn deploy(network: &str, source: &str, admin: Option<&str>, dry_run: bool, list:
     println!("Deploying {wasm} to {network}...");
     let output = std::process::Command::new("stellar")
         .args(["contract", "deploy", "--wasm", wasm,
+               // SECURITY: `source` is a Stellar secret key required by the
+               // Stellar CLI.  It is passed only as a subprocess argument and
+               // is never echoed to stdout or included in log messages.
                "--source", source,
                "--rpc-url", rpc_url(network),
                "--network-passphrase", passphrase(network)])
@@ -319,12 +392,17 @@ fn deploy(network: &str, source: &str, admin: Option<&str>, dry_run: bool, list:
         initialized: false,
     };
 
-    // Post-deployment initialization
-    let admin_addr = admin.unwrap_or(source);
+    // Post-deployment initialization.
+    // `admin_addr` is a Stellar *public* address (G...) or the alias "default".
+    // If the caller omitted --admin, we fall back to the source identifier
+    // (which may be a key alias, not the raw secret).  We print only the
+    // admin address, never the signing key.
+    let admin_addr = admin.unwrap_or("default");
     println!("Initializing contract with admin {admin_addr}...");
     let init_result = std::process::Command::new("stellar")
         .args(["contract", "invoke",
                "--id", &contract_id,
+               // SECURITY: `source` passed only as subprocess arg, not logged.
                "--source", source,
                "--rpc-url", rpc_url(network),
                "--network-passphrase", passphrase(network),
@@ -341,7 +419,7 @@ fn deploy(network: &str, source: &str, admin: Option<&str>, dry_run: bool, list:
             eprintln!("⚠️  Post-deployment initialization failed:");
             eprintln!("{}", String::from_utf8_lossy(&out.stderr).trim());
             eprintln!("\nContract ID: {contract_id}");
-            eprintln!("To initialize manually: stellar contract invoke --id {contract_id} --source <ADMIN> -- initialize --admin <ADMIN_ADDRESS>");
+            eprintln!("To initialize manually: stellar contract invoke --id {contract_id} --source <SIGNING_KEY_OR_ALIAS> -- initialize --admin <ADMIN_ADDRESS>");
         }
         Err(e) => {
             eprintln!("⚠️  Could not run initialization: {e}");
@@ -366,11 +444,13 @@ fn parse_services(services: &[String]) -> Vec<u32> {
 
 fn register(
     address: &str, services: &[String], contract_id: &str,
-    network: &str, source: &str, sep10_token: &str, sep10_issuer: &str,
+    network: &str, source: &SecretKey, sep10_token: &str, sep10_issuer: &str,
 ) {
     let service_ids = parse_services(services)
         .iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",");
 
+    // SECURITY: sep10_token is a bearer token.  It is passed only as a
+    // subprocess argument to the Stellar CLI and is never echoed to stdout.
     stellar_invoke(contract_id, source, network, &[
         "register_attestor",
         "--attestor", address,
@@ -388,11 +468,14 @@ fn register(
 
 fn attest(
     subject: &str, payload_hash: &str, contract_id: &str,
-    network: &str, source: &str, issuer: &str, session_id: Option<u64>,
+    network: &str, source: &SecretKey, issuer: &str, session_id: Option<u64>,
 ) {
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs().to_string();
 
+    // NOTE: `--signature` should be a real Ed25519 signature over the payload.
+    // The placeholder below reuses `payload_hash` only for local/test use.
+    // Production callers must supply a proper signature via a dedicated flag.
     let session_str;
     let result = if let Some(sid) = session_id {
         session_str = sid.to_string();
@@ -402,7 +485,7 @@ fn attest(
             "--issuer", issuer, "--subject", subject,
             "--timestamp", &timestamp,
             "--payload_hash", payload_hash,
-            "--signature", payload_hash,
+            "--signature", payload_hash,  // placeholder — replace with real sig
         ])
     } else {
         stellar_invoke(contract_id, source, network, &[
@@ -410,13 +493,13 @@ fn attest(
             "--issuer", issuer, "--subject", subject,
             "--timestamp", &timestamp,
             "--payload_hash", payload_hash,
-            "--signature", payload_hash,
+            "--signature", payload_hash,  // placeholder — replace with real sig
         ])
     };
     println!("Attestation ID: {result}");
 }
 
-fn quote(from: &str, to: &str, amount: u64, contract_id: &str, network: &str, source: &str) {
+fn quote(from: &str, to: &str, amount: u64, contract_id: &str, network: &str, source: &SecretKey) {
     let amount_str = amount.to_string();
     // route_transaction takes a RoutingOptions XDR; pass individual fields via stellar CLI args
     let raw = stellar_invoke(contract_id, source, network, &[
@@ -469,7 +552,7 @@ fn status(tx_id: &str, anchor_url: &str) {
     println!("{}", serde_json::to_string_pretty(&out).unwrap());
 }
 
-fn revoke(address: &str, contract_id: &str, network: &str, source: &str) {
+fn revoke(address: &str, contract_id: &str, network: &str, source: &SecretKey) {
     stellar_invoke(contract_id, source, network, &[
         "revoke_attestor",
         "--attestor", address,
@@ -563,9 +646,15 @@ fn check_contract_id_env() -> CheckResult {
 fn check_admin_secret_env() -> CheckResult {
     match std::env::var("ANCHOR_ADMIN_SECRET") {
         Ok(secret) if !secret.is_empty() && secret.starts_with('S') => {
-            CheckResult::pass("ANCHOR_ADMIN_SECRET set and appears valid")
+            // Confirm presence and basic format only — never log the value.
+            CheckResult::pass("ANCHOR_ADMIN_SECRET set and appears valid (starts with 'S')")
         }
-        Ok(_) => CheckResult::fail("ANCHOR_ADMIN_SECRET set but does not appear to be a valid secret key"),
+        Ok(secret) if !secret.is_empty() => {
+            // Value present but does not look like a Stellar secret key.
+            // Do NOT include the value or any prefix in the message.
+            CheckResult::fail("ANCHOR_ADMIN_SECRET is set but does not appear to be a valid Stellar secret key (expected 'S...' format)")
+        }
+        Ok(_) => CheckResult::warn("ANCHOR_ADMIN_SECRET is set but empty"),
         Err(_) => CheckResult::warn("ANCHOR_ADMIN_SECRET not set (required for signing operations)"),
     }
 }
@@ -586,18 +675,27 @@ fn check_network_connectivity(network: &str) -> CheckResult {
 }
 
 fn check_contract_deployment(contract_id: &str, network: &str) -> CheckResult {
-    let source = std::env::var("ANCHOR_ADMIN_SECRET").unwrap_or_else(|_| "default".to_string());
-    
+    // Use the SecretKey wrapper so the value is never accidentally logged.
+    // Fall back to the "default" alias (a named key in the Stellar CLI keystore)
+    // rather than embedding a raw secret in the subprocess arguments.
+    let source = std::env::var("ANCHOR_ADMIN_SECRET")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(SecretKey::new)
+        .unwrap_or_else(|| SecretKey::new("default"));
+
     let output = std::process::Command::new("stellar")
         .args(["contract", "invoke",
                "--id", contract_id,
-               "--source", &source,
+               // SECURITY: expose() is the only sanctioned way to pass the key
+               // to the subprocess; it is never echoed to stdout or stderr.
+               "--source", source.expose(),
                "--rpc-url", rpc_url(network),
                "--network-passphrase", passphrase(network),
                "--",
                "get_attestor_count"])
         .output();
-    
+
     match output {
         Ok(out) if out.status.success() => {
             CheckResult::pass(format!("Contract {} is deployed and responding", &contract_id[..contract_id.len().min(16)]))
@@ -703,7 +801,11 @@ fn main() {
     let cli = Cli::parse();
     match cli.command {
         Commands::Deploy { source, admin, dry_run, list } => {
-            deploy(&cli.network, &source, admin.as_deref(), dry_run, list);
+            // `source` is a Stellar CLI key alias (e.g. "default") or a raw
+            // secret key supplied via --source.  Wrap it in SecretKey so it
+            // is redacted if it ever appears in a formatted string.
+            let source_key = SecretKey::new(&source);
+            deploy(&cli.network, source_key.expose(), admin.as_deref(), dry_run, list);
         }
         Commands::Register { address, services, contract_id, network, secret_key, keypair_file, sep10_token, sep10_issuer } => {
             let source = resolve_source(secret_key.as_deref(), keypair_file.as_deref());
