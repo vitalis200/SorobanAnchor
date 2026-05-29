@@ -92,6 +92,40 @@ mod kyc_compliance_tests {
     }
 
     #[test]
+    fn test_kyc_status_expired_after_approval() {
+        let (env, admin, client) = setup_contract();
+        let attestor = Address::generate(&env);
+        let subject = Address::generate(&env);
+        register_attestor(&env, &client, &admin, &attestor);
+
+        let data_hash = Bytes::from_slice(&env, b"test_kyc_data_hash_1234567890ab");
+        client.submit_kyc(&subject, &data_hash, &attestor);
+        client.approve_kyc(&subject);
+        assert_eq!(client.get_kyc_status(&subject), KycStatus::Approved);
+
+        set_ledger(&env, 1000 + 30 * 24 * 60 * 60 + 1);
+        assert_eq!(client.get_kyc_status(&subject), KycStatus::Expired);
+    }
+
+    #[test]
+    fn test_kyc_can_resubmit_after_expiry() {
+        let (env, admin, client) = setup_contract();
+        let attestor = Address::generate(&env);
+        let subject = Address::generate(&env);
+        register_attestor(&env, &client, &admin, &attestor);
+
+        let data_hash = Bytes::from_slice(&env, b"test_kyc_data_hash_1234567890ab");
+        client.submit_kyc(&subject, &data_hash, &attestor);
+        client.approve_kyc(&subject);
+        set_ledger(&env, 1000 + 30 * 24 * 60 * 60 + 1);
+        assert_eq!(client.get_kyc_status(&subject), KycStatus::Expired);
+
+        let new_data_hash = Bytes::from_slice(&env, b"reopened_kyc_data_hash_1234567890ab");
+        client.submit_kyc(&subject, &new_data_hash, &attestor);
+        assert_eq!(client.get_kyc_status(&subject), KycStatus::Pending);
+    }
+
+    #[test]
     fn test_kyc_state_transition_pending_to_rejected() {
         let (env, admin, client) = setup_contract();
         let attestor = Address::generate(&env);

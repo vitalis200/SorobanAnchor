@@ -639,6 +639,35 @@ pub const MAX_OPS_PER_SESSION: u64 = 100;
 /// Minimum TTL for replay-protection entries (7 days in ledgers at ~5 s/ledger).
 pub const REPLAY_TTL: u32 = 120_960;
 
+/// Default lifetime for an approved KYC record before the approval expires.
+const KYC_EXPIRY_SECONDS: u64 = 30 * 24 * 60 * 60; // 30 days
+
+fn current_kyc_status(env: &Env, record: &KycRecord) -> KycStatus {
+    if let Some(expiry) = record.expiry {
+        if env.ledger().timestamp() > expiry {
+            return KycStatus::Expired;
+        }
+    }
+    match record.status {
+        0 => KycStatus::NotSubmitted,
+        1 => KycStatus::Pending,
+        2 => KycStatus::Approved,
+        3 => KycStatus::Rejected,
+        4 => KycStatus::Expired,
+        _ => KycStatus::NotSubmitted,
+    }
+}
+
+fn validate_kyc_transition(current: KycStatus, next: KycStatus, _record: &KycRecord, _now: u64) -> bool {
+    match (current, next) {
+        (KycStatus::NotSubmitted, KycStatus::Pending) => true,
+        (KycStatus::Expired, KycStatus::Pending) => true,
+        (KycStatus::Pending, KycStatus::Approved) => true,
+        (KycStatus::Pending, KycStatus::Rejected) => true,
+        _ => false,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Storage key helpers — all keys go through make_storage_key for collision
 // resistance (#229). Each namespace uses a unique prefix byte slice.
@@ -1864,7 +1893,12 @@ impl AnchorKitContract {
         let now = env.ledger().timestamp();
         let key = kyc_record_key(&env, &subject);
         if env.storage().persistent().has(&key) {
-            panic_with_error!(&env, ErrorCode::ComplianceNotMet);
+            let existing: KycRecord = env.storage().persistent().get(&key)
+                .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::ComplianceNotMet));
+            let current_status = Self::current_kyc_status(&env, &existing);
+            if !Self::validate_kyc_transition(current_status, KycStatus::Pending, &existing, now) {
+                panic_with_error!(&env, ErrorCode::ComplianceNotMet);
+            }
         }
         let record = KycRecord {
             subject: subject.clone(), status: KycStatus::Pending as u32,
@@ -1892,11 +1926,13 @@ impl AnchorKitContract {
         let key = kyc_record_key(&env, &subject);
         let mut record: KycRecord = env.storage().persistent().get(&key)
             .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::KycNotFound));
-        if record.status != KycStatus::Pending as u32 {
+        let current_status = Self::current_kyc_status(&env, &record);
+        if !Self::validate_kyc_transition(current_status, KycStatus::Approved, &record, now) {
             panic_with_error!(&env, ErrorCode::IllegalTransition);
         }
         record.status = KycStatus::Approved as u32;
         record.reviewed_at = Some(now);
+        record.expiry = Some(now + KYC_EXPIRY_SECONDS);
         env.storage().persistent().set(&key, &record);
         env.storage().persistent().extend_ttl(&key, PERSISTENT_TTL, PERSISTENT_TTL);
         env.events().publish(
@@ -1914,11 +1950,13 @@ impl AnchorKitContract {
         let key = kyc_record_key(&env, &subject);
         let mut record: KycRecord = env.storage().persistent().get(&key)
             .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::KycNotFound));
-        if record.status != KycStatus::Pending as u32 {
+        let current_status = Self::current_kyc_status(&env, &record);
+        if !Self::validate_kyc_transition(current_status, KycStatus::Rejected, &record, now) {
             panic_with_error!(&env, ErrorCode::IllegalTransition);
         }
         record.status = KycStatus::Rejected as u32;
         record.reviewed_at = Some(now);
+        record.expiry = None;
         record.rejection_reason_hash = Some(reason_hash.clone());
         env.storage().persistent().set(&key, &record);
         env.storage().persistent().extend_ttl(&key, PERSISTENT_TTL, PERSISTENT_TTL);
