@@ -82,11 +82,11 @@ pub enum ErrorCode {
     IllegalTransition         = 24,
     SessionExpired            = 25,
     SessionClosed             = 26,
-    UnsupportedCapabilityVersion = 27,
+    UnsupportedCapabilityVersion = 29,
 
-    // Session / routing errors (27–30)
-    SessionOperationLimitExceeded = 27,
-    InvalidWeights                = 28,
+    // Session / routing errors (30–31)
+    SessionOperationLimitExceeded = 30,
+    InvalidWeights                = 31,
 
     // Cache errors (48–49)
     CacheExpired              = 48,
@@ -99,6 +99,8 @@ pub enum ErrorCode {
     InvalidRequestContext     = 51,
     /// Session metadata is malformed (empty operation type, zero timestamp, etc.).
     InvalidSessionMetadata    = 52,
+    /// Asset code is empty, too long, or contains invalid characters.
+    InvalidAssetCode          = 53,
 }
 
 impl ErrorCode {
@@ -146,6 +148,7 @@ impl ErrorCode {
             ErrorCode::IllegalTransition         => "Illegal transaction state transition",
             ErrorCode::SessionExpired            => "Session has expired",
             ErrorCode::SessionClosed                  => "Session is closed",
+            ErrorCode::UnsupportedCapabilityVersion    => "Service capability version is unsupported",
             ErrorCode::SessionOperationLimitExceeded   => "Session operation limit exceeded",
             ErrorCode::InvalidWeights                  => "Routing weights must sum to 1.0",
             ErrorCode::CacheExpired              => "Cache entry has expired",
@@ -153,6 +156,7 @@ impl ErrorCode {
             ErrorCode::AttestorProfileNotFound   => "Attestor profile not found",
             ErrorCode::InvalidRequestContext     => "Request context is invalid",
             ErrorCode::InvalidSessionMetadata    => "Session metadata is invalid",
+            ErrorCode::InvalidAssetCode          => "Asset code is invalid",
         }
     }
 }
@@ -322,6 +326,13 @@ impl AnchorKitError {
     pub fn attestor_profile_not_found() -> Self { Self::from_code(ErrorCode::AttestorProfileNotFound) }
     pub fn invalid_request_context() -> Self { Self::from_code(ErrorCode::InvalidRequestContext) }
     pub fn invalid_session_metadata() -> Self { Self::from_code(ErrorCode::InvalidSessionMetadata) }
+    pub fn invalid_asset_code(code: &str) -> Self {
+        Self::with_context(
+            ErrorCode::InvalidAssetCode,
+            ErrorCode::InvalidAssetCode.default_message(),
+            code,
+        )
+    }
 
     /// Richer constructor that captures how many attempts were made and the
     /// last transport/HTTP error string.
@@ -356,6 +367,42 @@ impl AnchorKitError {
 
 /// Backward-compatible alias. Prefer [`AnchorKitError`] for new code.
 pub type Error = AnchorKitError;
+
+// ---------------------------------------------------------------------------
+// Asset code normalization
+// ---------------------------------------------------------------------------
+
+/// Normalize and validate a Stellar asset code.
+///
+/// - Trims whitespace.
+/// - Uppercases ASCII letters.
+/// - Rejects codes that are empty or longer than 12 characters after normalization.
+/// - Rejects codes containing characters other than ASCII alphanumerics.
+///
+/// Returns the normalized (uppercased) code on success, or
+/// [`AnchorKitError::invalid_asset_code`] on failure.
+///
+/// # Examples
+///
+/// ```rust
+/// use anchorkit::errors::normalize_asset_code;
+///
+/// assert_eq!(normalize_asset_code("usdc").unwrap(), "USDC");
+/// assert_eq!(normalize_asset_code("XLM").unwrap(), "XLM");
+/// assert!(normalize_asset_code("").is_err());
+/// assert!(normalize_asset_code("TOOLONGCODE!!").is_err());
+/// assert!(normalize_asset_code("BAD CODE").is_err());
+/// ```
+pub fn normalize_asset_code(code: &str) -> Result<String, AnchorKitError> {
+    let trimmed = code.trim();
+    if trimmed.is_empty() || trimmed.len() > 12 {
+        return Err(AnchorKitError::invalid_asset_code(code));
+    }
+    if !trimmed.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return Err(AnchorKitError::invalid_asset_code(code));
+    }
+    Ok(trimmed.to_ascii_uppercase())
+}
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -481,6 +528,7 @@ mod tests {
         assert_eq!(ErrorCode::AttestorProfileNotFound as u32, 50);
         assert_eq!(ErrorCode::InvalidRequestContext as u32, 51);
         assert_eq!(ErrorCode::InvalidSessionMetadata as u32, 52);
+        assert_eq!(ErrorCode::InvalidAssetCode      as u32, 53);
     }
 
     #[test]
@@ -494,5 +542,48 @@ mod tests {
         let a = AnchorKitError::from_code(ErrorCode::StaleQuote);
         let b = a.clone();
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_normalize_asset_code_uppercases() {
+        assert_eq!(super::normalize_asset_code("usdc").unwrap(), "USDC");
+        assert_eq!(super::normalize_asset_code("xlm").unwrap(), "XLM");
+        assert_eq!(super::normalize_asset_code("Eurc").unwrap(), "EURC");
+    }
+
+    #[test]
+    fn test_normalize_asset_code_already_upper() {
+        assert_eq!(super::normalize_asset_code("USDC").unwrap(), "USDC");
+    }
+
+    #[test]
+    fn test_normalize_asset_code_trims_whitespace() {
+        assert_eq!(super::normalize_asset_code("  USDC  ").unwrap(), "USDC");
+    }
+
+    #[test]
+    fn test_normalize_asset_code_empty_rejected() {
+        let err = super::normalize_asset_code("").unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidAssetCode);
+    }
+
+    #[test]
+    fn test_normalize_asset_code_too_long_rejected() {
+        let err = super::normalize_asset_code("TOOLONGCODE13").unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidAssetCode);
+    }
+
+    #[test]
+    fn test_normalize_asset_code_invalid_chars_rejected() {
+        for bad in &["BAD CODE", "USD-C", "USD.C", "USD@C"] {
+            let err = super::normalize_asset_code(bad).unwrap_err();
+            assert_eq!(err.code, ErrorCode::InvalidAssetCode);
+        }
+    }
+
+    #[test]
+    fn test_normalize_asset_code_max_length_accepted() {
+        // 12 chars is the Stellar maximum
+        assert!(super::normalize_asset_code("ABCDEFGHIJKL").is_ok());
     }
 }

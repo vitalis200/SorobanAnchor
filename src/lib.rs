@@ -66,6 +66,7 @@
 //!     clawback_enabled: None,
 //!     stellar_memo: None,
 //!     stellar_memo_type: None,
+//!     asset_code: None,
 //! };
 //! let deposit = initiate_deposit(raw).expect("invalid deposit response");
 //! println!("Transaction ID: {}", deposit.transaction_id);
@@ -107,8 +108,10 @@ pub mod errors;
 pub mod sep10_jwt;
 pub mod rate_limiter;
 mod response_validator;
+#[cfg(feature = "std")]
+pub mod config;
 pub mod retry;
-mod transaction_state_tracker;
+pub mod transaction_state_tracker;
 pub mod webhook;
 pub mod sep6;
 pub mod sep24;
@@ -118,6 +121,7 @@ pub mod stellar_toml;
 
 pub use domain_validator::validate_anchor_domain;
 pub use errors::{AnchorKitError, ErrorCode};
+pub use errors::normalize_asset_code;
 pub use stellar_toml::{ParsedCurrency, ParsedStellarToml, parse_stellar_toml, fetch_stellar_toml_url};
 
 /// Backward-compatible alias. Prefer [`AnchorKitError`] for new code.
@@ -132,6 +136,8 @@ pub use response_validator::{
 };
 pub use retry::{retry_with_backoff, is_retryable, RetryConfig, JitterSource, LedgerJitterSource, MockJitterSource};
 pub use deterministic_hash::{compute_payload_hash, verify_payload_hash};
+#[cfg(feature = "std")]
+pub use config::{load_runtime_config_file, parse_runtime_config_str, ConfigFormat, RuntimeConfig};
 pub use webhook::{deliver_webhook, get_dead_letter_webhooks, query_dlq, WebhookDeliveryConfig, DlqEntry};
 
 pub use sep6::{
@@ -147,8 +153,8 @@ pub use sep24::{
     RawInteractiveDepositResponse, RawInteractiveWithdrawalResponse, RawSep24TransactionResponse,
 };
 pub use contract::{AnchorKitContract, EndpointUpdated, CacheConfig};
-pub use transaction_state_tracker::{TransactionState, TransactionStateRecord};
-pub use transaction_state_tracker::StorageBudgetMonitor;
+pub use transaction_state_tracker::{TransactionState, TransactionStateRecord, RecoveryMetadata};
+pub use transaction_state_tracker::{StorageBudgetMonitor, TransactionStateTracker};
 pub mod streaming_monitor;
 pub use streaming_monitor::{StreamingTransactionMonitor, TransactionStatusUpdate};
 

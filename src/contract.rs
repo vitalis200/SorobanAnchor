@@ -1,7 +1,7 @@
 use alloc::{string::String as RustString, vec::Vec as RustVec};
 use soroban_sdk::{
     contract, contractimpl, contracttype, panic_with_error, symbol_short, Address,
-    Bytes, BytesN, Env, String, Symbol, Vec,
+    xdr::ToXdr, Bytes, BytesN, Env, IntoVal, String, Symbol, Vec,
 };
 extern crate alloc;
 
@@ -381,6 +381,24 @@ pub struct CapabilitiesCache {
     pub ttl_seconds: u64,
 }
 
+#[contracttype]
+#[derive(Copy, Clone, Debug, PartialEq)]
+#[repr(u32)]
+pub enum RefreshStatus {
+    Success = 1,
+    Failed = 2,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct RefreshDiagnostic {
+    pub operation: String,
+    pub status: RefreshStatus,
+    pub attempted_at: u64,
+    pub had_cached_entry: bool,
+    pub detail: String,
+}
+
 // ---------------------------------------------------------------------------
 // Anchor Info Discovery types
 // ---------------------------------------------------------------------------
@@ -643,10 +661,8 @@ fn kyc_record_key(env: &Env, subject: &Address) -> BytesN<32> {
 fn compliance_check_key(env: &Env, subject: &Address, check_type: &String) -> BytesN<32> {
     let xdr = subject.clone().to_xdr(env);
     let raw = xdr_to_vec(&xdr);
-    let mut ct_bytes = alloc::vec::Vec::with_capacity(check_type.len() as usize);
-    for i in 0..check_type.len() {
-        ct_bytes.push(check_type.get(i).unwrap_or(0));
-    }
+    let ct_xdr = check_type.clone().to_xdr(env);
+    let ct_bytes = xdr_to_vec(&ct_xdr);
     make_storage_key(env, &[b"COMP", &raw, &ct_bytes])
 }
 
@@ -691,11 +707,22 @@ fn validate_amount_limits(env: &Env, min_amount: u64, max_amount: u64) {
     }
 }
 
-/// Panic with [`ErrorCode::ValidationError`] when `code` is empty or longer
-/// than 12 characters (the Stellar maximum asset-code length).
+/// Panic with [`ErrorCode::InvalidAssetCode`] when `code` is empty, longer
+/// than 12 characters, or contains non-alphanumeric characters.
 fn validate_currency_code(env: &Env, code: &String) {
-    if code.len() == 0 || code.len() > 12 {
-        panic_with_error!(env, ErrorCode::ValidationError);
+    let len = code.len();
+    if len == 0 || len > 12 {
+        panic_with_error!(env, ErrorCode::InvalidAssetCode);
+    }
+    // Soroban String: iterate bytes and check ASCII alphanumeric
+    let bytes = code.to_xdr(env);
+    // XDR-encoded string has a 4-byte length prefix; skip it
+    let n = bytes.len() as usize;
+    for i in 4..n {
+        let b = bytes.get(i as u32).unwrap_or(0);
+        if !b.is_ascii_alphanumeric() {
+            panic_with_error!(env, ErrorCode::InvalidAssetCode);
+        }
     }
 }
 
@@ -735,6 +762,14 @@ impl AnchorKitContract {
         env.storage().persistent().extend_ttl(&init_key, PERSISTENT_TTL, PERSISTENT_TTL);
         env.storage().instance().set(&admin_key(&env), &admin);
         env.storage().instance().extend_ttl(INSTANCE_TTL, INSTANCE_TTL);
+    }
+
+    /// Returns `true` if the contract has been initialized, `false` otherwise.
+    pub fn is_initialized(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get::<_, bool>(&symbol_short!("INITED"))
+            .unwrap_or(false)
     }
 
     pub fn get_admin(env: Env) -> Address {
@@ -870,6 +905,51 @@ impl AnchorKitContract {
     /// fall back to `configured`.
     fn effective_ttl(override_ttl: u64, configured: u64) -> u64 {
         if override_ttl != 0 { override_ttl } else { configured }
+    }
+
+    fn refresh_diagnostic_key(
+        env: &Env,
+        anchor: &Address,
+        operation: &String,
+    ) -> soroban_sdk::Vec<soroban_sdk::Val> {
+        soroban_sdk::vec![
+            env,
+            symbol_short!("REFDIAG").into_val(env),
+            anchor.clone().into_val(env),
+            operation.clone().into_val(env),
+        ]
+    }
+
+    fn record_refresh_diagnostic(
+        env: &Env,
+        anchor: &Address,
+        operation: String,
+        status: RefreshStatus,
+        had_cached_entry: bool,
+        detail: String,
+    ) {
+        let diagnostic = RefreshDiagnostic {
+            operation: operation.clone(),
+            status,
+            attempted_at: env.ledger().timestamp(),
+            had_cached_entry,
+            detail,
+        };
+        let key = Self::refresh_diagnostic_key(env, anchor, &operation);
+        env.storage().temporary().set(&key, &diagnostic);
+        env.storage().temporary().extend_ttl(&key, MIN_TEMP_TTL, MIN_TEMP_TTL);
+    }
+
+    pub fn get_refresh_diagnostic(
+        env: Env,
+        anchor: Address,
+        operation: String,
+    ) -> RefreshDiagnostic {
+        let key = Self::refresh_diagnostic_key(&env, &anchor, &operation);
+        env.storage()
+            .temporary()
+            .get(&key)
+            .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::CacheNotFound))
     }
 
     // -----------------------------------------------------------------------
@@ -1287,7 +1367,11 @@ impl AnchorKitContract {
             }
             seen.push_back(s);
         }
-        let record = AnchorServices { anchor: anchor.clone(), services: services.clone() };
+        let record = AnchorServices {
+            anchor: anchor.clone(),
+            services: services.clone(),
+            service_capability_version: version,
+        };
         let key = make_storage_key(&env, &[b"SERVICES", &raw]);
         env.storage().persistent().set(&key, &record);
         env.storage().persistent().extend_ttl(&key, PERSISTENT_TTL, PERSISTENT_TTL);
@@ -2002,6 +2086,8 @@ impl AnchorKitContract {
         valid_until: u64,
     ) -> u64 {
         anchor.require_auth();
+        validate_currency_code(&env, &base_asset);
+        validate_currency_code(&env, &quote_asset);
         validate_fee_percent(&env, fee_percentage);
         validate_amount_limits(&env, minimum_amount, maximum_amount);
         let inst = env.storage().instance();
@@ -2016,6 +2102,7 @@ impl AnchorKitContract {
             quote_id: next, anchor: anchor.clone(),
             base_asset: base_asset.clone(), quote_asset: quote_asset.clone(),
             rate, fee_percentage, minimum_amount, maximum_amount, valid_until,
+            schema_version: SCHEMA_V1,
         };
         let q_key = make_storage_key(&env, &[b"QUOTE", &anchor_raw, &next.to_be_bytes()]);
         env.storage().persistent().set(&q_key, &quote);
@@ -2314,7 +2401,7 @@ impl AnchorKitContract {
             stale_ttl_seconds: 0,
             needs_refresh: false,
         };
-        let key = (symbol_short!("METACACHE"), anchor);
+        let key = (symbol_short!("METACACHE"), anchor.clone());
         let ledger_ttl = if ttl as u32 > MIN_TEMP_TTL { ttl as u32 } else { MIN_TEMP_TTL };
         env.storage().temporary().set(&key, &entry);
         env.storage().temporary().extend_ttl(&key, ledger_ttl, ledger_ttl);
@@ -2333,8 +2420,16 @@ impl AnchorKitContract {
 
     pub fn refresh_metadata_cache(env: Env, anchor: Address) {
         Self::require_admin(&env);
-        let key = (symbol_short!("METACACHE"), anchor);
-        env.storage().temporary().remove(&key);
+        let key = (symbol_short!("METACACHE"), anchor.clone());
+        let had_cached_entry = env.storage().temporary().has(&key);
+        Self::record_refresh_diagnostic(
+            &env,
+            &anchor,
+            String::from_str(&env, "metadata"),
+            RefreshStatus::Failed,
+            had_cached_entry,
+            String::from_str(&env, "refresh failed before replacement metadata was available"),
+        );
     }
 
     /// Store a metadata entry with a stale-while-revalidate grace period.
@@ -2359,7 +2454,7 @@ impl AnchorKitContract {
             stale_ttl_seconds: stale,
             needs_refresh: false,
         };
-        let key = (symbol_short!("METACACHE"), anchor);
+        let key = (symbol_short!("METACACHE"), anchor.clone());
         let total_ttl = ttl.saturating_add(stale);
         let ledger_ttl = if total_ttl as u32 > MIN_TEMP_TTL { total_ttl as u32 } else { MIN_TEMP_TTL };
         env.storage().temporary().set(&key, &entry);
@@ -2413,7 +2508,7 @@ impl AnchorKitContract {
             stale_ttl_seconds: stale,
             needs_refresh: false,
         };
-        let key = (symbol_short!("METACACHE"), anchor);
+        let key = (symbol_short!("METACACHE"), anchor.clone());
         let total_ttl = ttl.saturating_add(stale);
         let ledger_ttl = if total_ttl as u32 > MIN_TEMP_TTL { total_ttl as u32 } else { MIN_TEMP_TTL };
         env.storage().temporary().set(&key, &entry);
@@ -2512,7 +2607,7 @@ impl AnchorKitContract {
         let cfg = Self::get_cache_config(env.clone());
         let ttl = Self::effective_ttl(ttl_seconds, cfg.capabilities_ttl_seconds);
         let entry = CapabilitiesCache { toml_url, capabilities, cached_at: now, ttl_seconds: ttl };
-        let key = (symbol_short!("CAPCACHE"), anchor);
+        let key = (symbol_short!("CAPCACHE"), anchor.clone());
         let ledger_ttl = if ttl as u32 > MIN_TEMP_TTL { ttl as u32 } else { MIN_TEMP_TTL };
         env.storage().temporary().set(&key, &entry);
         env.storage().temporary().extend_ttl(&key, ledger_ttl, ledger_ttl);
@@ -2531,8 +2626,16 @@ impl AnchorKitContract {
 
     pub fn refresh_capabilities_cache(env: Env, anchor: Address) {
         Self::require_admin(&env);
-        let key = (symbol_short!("CAPCACHE"), anchor);
-        env.storage().temporary().remove(&key);
+        let key = (symbol_short!("CAPCACHE"), anchor.clone());
+        let had_cached_entry = env.storage().temporary().has(&key);
+        Self::record_refresh_diagnostic(
+            &env,
+            &anchor,
+            String::from_str(&env, "capabilities"),
+            RefreshStatus::Failed,
+            had_cached_entry,
+            String::from_str(&env, "refresh failed before replacement capabilities were available"),
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -2630,6 +2733,8 @@ impl AnchorKitContract {
     }
 
     pub fn route_transaction(env: Env, options: RoutingOptions) -> Quote {
+        validate_currency_code(&env, &options.request.base_asset);
+        validate_currency_code(&env, &options.request.quote_asset);
         let now = env.ledger().timestamp();
         let list_key = make_storage_key(&env, &[b"ANCHLIST"]);
         let anchors: Vec<Address> = env.storage().persistent()
@@ -2912,7 +3017,7 @@ impl AnchorKitContract {
             cached_at: now,
             ttl_seconds: ttl,
         };
-        let key = (symbol_short!("TOMLCACHE"), anchor);
+        let key = (symbol_short!("TOMLCACHE"), anchor.clone());
         let ledger_ttl = if ttl as u32 > MIN_TEMP_TTL { ttl as u32 } else { MIN_TEMP_TTL };
         env.storage().temporary().set(&key, &cached);
         env.storage().temporary().extend_ttl(&key, ledger_ttl, ledger_ttl);
@@ -2931,8 +3036,16 @@ impl AnchorKitContract {
 
     pub fn refresh_anchor_info(env: Env, anchor: Address) {
         anchor.require_auth();
-        let key = (symbol_short!("TOMLCACHE"), anchor);
-        env.storage().temporary().remove(&key);
+        let key = (symbol_short!("TOMLCACHE"), anchor.clone());
+        let had_cached_entry = env.storage().temporary().has(&key);
+        Self::record_refresh_diagnostic(
+            &env,
+            &anchor,
+            String::from_str(&env, "anchor_info"),
+            RefreshStatus::Failed,
+            had_cached_entry,
+            String::from_str(&env, "refresh failed before replacement anchor info was available"),
+        );
     }
 
     pub fn get_anchor_assets(env: Env, anchor: Address) -> Vec<String> {
@@ -3187,7 +3300,15 @@ impl AnchorKitContract {
         payload_hash: Bytes,
         signature: Bytes,
     ) {
-        let attestation = Attestation { id, issuer, subject, timestamp, payload_hash, signature };
+        let attestation = Attestation {
+            id,
+            issuer,
+            subject,
+            timestamp,
+            payload_hash,
+            signature,
+            schema_version: SCHEMA_V1,
+        };
         let key = make_storage_key(env, &[b"ATTEST", &id.to_be_bytes()]);
         env.storage().persistent().set(&key, &attestation);
         env.storage().persistent().extend_ttl(&key, PERSISTENT_TTL, PERSISTENT_TTL);

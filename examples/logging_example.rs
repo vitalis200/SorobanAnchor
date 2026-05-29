@@ -40,6 +40,7 @@ fn main() {
         clawback_enabled: None,
         stellar_memo: None,
         stellar_memo_type: None,
+        asset_code: None,
     };
     match initiate_deposit(raw) {
         Ok(deposit) => println!("  ✅ Deposit txn: {}", deposit.transaction_id),

@@ -1,8 +1,6 @@
 #![allow(dead_code)]
 use soroban_sdk::{contracttype, symbol_short, Address, Env, String, Vec};
 
-use crate::errors::AnchorKitError;
-
 /// Default TTL: ~90 days at 5 s/ledger.
 const TXSTATE_TTL: u32 = 1_555_200;
 /// Terminal TTL: ~30 days.
@@ -112,8 +110,20 @@ impl TransactionState {
         }
     }
 
-    /// Returns true only for legal forward transitions:
-    /// `Pending → InProgress`, `InProgress → Completed`, `InProgress → Failed`.
+    /// Returns `true` only for explicitly permitted forward transitions.
+    ///
+    /// # Transition matrix
+    ///
+    /// | From        | To          | Allowed |
+    /// |-------------|-------------|---------|
+    /// | Pending     | InProgress  | ✓       |
+    /// | Pending     | Failed      | ✓ (immediate failure before processing starts) |
+    /// | InProgress  | Completed   | ✓       |
+    /// | InProgress  | Failed      | ✓       |
+    /// | Completed   | *           | ✗ terminal state |
+    /// | Failed      | *           | ✗ terminal state |
+    /// | *           | Pending     | ✗ no backward resets |
+    /// | *           | same state  | ✗ no self-loops |
     ///
     /// # Arguments
     ///
@@ -128,17 +138,103 @@ impl TransactionState {
     /// ```rust
     /// use anchorkit::TransactionState;
     ///
+    /// // Valid forward transitions
     /// assert!(TransactionState::Pending.is_valid_transition(TransactionState::InProgress));
+    /// assert!(TransactionState::Pending.is_valid_transition(TransactionState::Failed));
+    /// assert!(TransactionState::InProgress.is_valid_transition(TransactionState::Completed));
+    /// assert!(TransactionState::InProgress.is_valid_transition(TransactionState::Failed));
+    ///
+    /// // Terminal states cannot transition further
     /// assert!(!TransactionState::Completed.is_valid_transition(TransactionState::InProgress));
+    /// assert!(!TransactionState::Failed.is_valid_transition(TransactionState::InProgress));
+    ///
+    /// // Backward and self-loop transitions are rejected
+    /// assert!(!TransactionState::Completed.is_valid_transition(TransactionState::Pending));
+    /// assert!(!TransactionState::Pending.is_valid_transition(TransactionState::Pending));
+    /// assert!(!TransactionState::InProgress.is_valid_transition(TransactionState::Pending));
     /// ```
     pub fn is_valid_transition(&self, to: TransactionState) -> bool {
         matches!(
             (self, to),
-            (TransactionState::Pending, TransactionState::InProgress)
-                | (TransactionState::InProgress, TransactionState::Completed)
-                | (TransactionState::InProgress, TransactionState::Failed)
+            // Pending can move forward to processing or fail immediately
+            (TransactionState::Pending,    TransactionState::InProgress)
+            | (TransactionState::Pending,  TransactionState::Failed)
+            // InProgress can complete successfully or fail
+            | (TransactionState::InProgress, TransactionState::Completed)
+            | (TransactionState::InProgress, TransactionState::Failed)
+            // Completed and Failed are terminal — no further transitions allowed
         )
     }
+
+    /// Returns `true` if this state is terminal (no further transitions are permitted).
+    ///
+    /// Terminal states are [`Completed`](TransactionState::Completed) and
+    /// [`Failed`](TransactionState::Failed).
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use anchorkit::TransactionState;
+    ///
+    /// assert!(TransactionState::Completed.is_terminal());
+    /// assert!(TransactionState::Failed.is_terminal());
+    /// assert!(!TransactionState::Pending.is_terminal());
+    /// assert!(!TransactionState::InProgress.is_terminal());
+    /// ```
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, TransactionState::Completed | TransactionState::Failed)
+    }
+
+    /// Build the canonical error message for an illegal transition from `self` to `to`.
+    ///
+    /// The message is prefixed with `"[E24]"` (the [`ErrorCode::IllegalTransition`]
+    /// discriminant) so callers can detect transition errors without string-matching
+    /// the full message body.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use anchorkit::TransactionState;
+    ///
+    /// let msg = TransactionState::Completed.illegal_transition_message(TransactionState::Pending);
+    /// assert!(msg.starts_with("[E24]"));
+    /// assert!(msg.contains("completed"));
+    /// assert!(msg.contains("pending"));
+    /// ```
+    pub fn illegal_transition_message(&self, to: TransactionState) -> alloc::string::String {
+        alloc::format!(
+            "[E24] Illegal transaction state transition: {} -> {}",
+            self.as_str(),
+            to.as_str()
+        )
+    }
+}
+
+/// Recovery metadata attached to a failed transaction.
+///
+/// Populated by [`TransactionStateTracker::fail_transaction`] and accessible
+/// via [`TransactionStateTracker::get_recovery_metadata`].
+///
+/// # Fields
+///
+/// - `failure_reason`: human-readable description of why the transaction failed.
+/// - `last_updated_ledger`: the ledger sequence number at the time of failure,
+///   useful for on-chain auditing and replay-protection checks.
+/// - `failed_from_state`: the state the transaction was in when it failed,
+///   which indicates how far processing progressed before the error.
+/// - `retry_count`: number of times a recovery attempt has been recorded via
+///   [`TransactionStateTracker::record_recovery_attempt`].
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecoveryMetadata {
+    /// Human-readable reason for the failure.
+    pub failure_reason: String,
+    /// Ledger sequence number at the time of failure.
+    pub last_updated_ledger: u32,
+    /// The state the transaction occupied immediately before failing.
+    pub failed_from_state: TransactionState,
+    /// Number of recovery attempts recorded after the failure.
+    pub retry_count: u32,
 }
 
 /// A snapshot of a tracked transaction's current state.
@@ -153,9 +249,14 @@ pub struct TransactionStateRecord {
     pub initiator: Address,
     pub timestamp: u64,
     pub last_updated: u64,
+    /// Ledger sequence number of the most recent state change.
+    pub last_updated_ledger: u32,
     pub error_message: Option<String>,
     /// Full state progression: (state, timestamp) pairs in chronological order.
     pub state_history: Vec<(TransactionState, u64)>,
+    /// Recovery metadata, populated when the transaction enters the
+    /// [`Failed`](TransactionState::Failed) state.
+    pub recovery_metadata: Option<RecoveryMetadata>,
 }
 
 /// Audit entry for a single transition attempt (success or failure).
@@ -269,14 +370,17 @@ impl TransactionStateTracker {
         let mut history = Vec::new(env);
         history.push_back((TransactionState::Pending, current_time));
 
+        let current_ledger = env.ledger().sequence();
         let record = TransactionStateRecord {
             transaction_id,
             state: TransactionState::Pending,
             initiator,
             timestamp: current_time,
             last_updated: current_time,
+            last_updated_ledger: current_ledger,
             error_message: None,
             state_history: history,
+            recovery_metadata: None,
         };
 
         if self.is_dev_mode {
@@ -380,8 +484,11 @@ impl TransactionStateTracker {
 
     /// Transition a transaction to [`Failed`](TransactionState::Failed) with an error message.
     ///
-    /// The transition is legal from both [`Pending`](TransactionState::Pending) and
-    /// [`InProgress`](TransactionState::InProgress).
+    /// The transition is legal from [`Pending`](TransactionState::Pending) (immediate
+    /// pre-processing failure) and [`InProgress`](TransactionState::InProgress) (mid-flight
+    /// failure). Attempting to fail a transaction that is already in a terminal state
+    /// ([`Completed`](TransactionState::Completed) or [`Failed`](TransactionState::Failed))
+    /// returns an error.
     ///
     /// # Arguments
     ///
@@ -438,6 +545,7 @@ impl TransactionStateTracker {
         env: &Env,
     ) -> Result<TransactionStateRecord, String> {
         let current_time = env.ledger().timestamp();
+        let current_ledger = env.ledger().sequence();
 
         if self.is_dev_mode {
             for record in self.cache.iter_mut() {
@@ -454,18 +562,28 @@ impl TransactionStateTracker {
                     if !valid {
                         return Err(String::from_str(
                             env,
-                            AnchorKitError::illegal_transition(
-                                from_state.as_str(),
-                                new_state.as_str(),
-                            )
-                            .message
-                            .as_str(),
+                            &from_state.illegal_transition_message(new_state),
                         ));
                     }
                     record.state = new_state;
                     record.last_updated = current_time;
-                    record.error_message = error_message;
+                    record.last_updated_ledger = current_ledger;
+                    record.error_message = error_message.clone();
                     record.state_history.push_back((new_state, current_time));
+
+                    // Populate recovery metadata when transitioning to Failed.
+                    if new_state == TransactionState::Failed {
+                        let reason = error_message
+                            .clone()
+                            .unwrap_or_else(|| String::from_str(env, "unspecified failure"));
+                        record.recovery_metadata = Some(RecoveryMetadata {
+                            failure_reason: reason,
+                            last_updated_ledger: current_ledger,
+                            failed_from_state: from_state,
+                            retry_count: 0,
+                        });
+                    }
+
                     return Ok(record.clone());
                 }
             }
@@ -506,19 +624,28 @@ impl TransactionStateTracker {
             if !valid {
                 return Err(String::from_str(
                     env,
-                    AnchorKitError::illegal_transition(
-                        from_state.as_str(),
-                        new_state.as_str(),
-                    )
-                    .message
-                    .as_str(),
+                    &from_state.illegal_transition_message(new_state),
                 ));
             }
 
             record.state = new_state;
             record.last_updated = current_time;
-            record.error_message = error_message;
+            record.last_updated_ledger = current_ledger;
+            record.error_message = error_message.clone();
             record.state_history.push_back((new_state, current_time));
+
+            // Populate recovery metadata when transitioning to Failed.
+            if new_state == TransactionState::Failed {
+                let reason = error_message
+                    .clone()
+                    .unwrap_or_else(|| String::from_str(env, "unspecified failure"));
+                record.recovery_metadata = Some(RecoveryMetadata {
+                    failure_reason: reason,
+                    last_updated_ledger: current_ledger,
+                    failed_from_state: from_state,
+                    retry_count: 0,
+                });
+            }
 
             env.storage().persistent().set(&key, &record);
             env.storage()
@@ -776,6 +903,208 @@ impl TransactionStateTracker {
         self.cache.len()
     }
 
+    // ── Recovery helpers ─────────────────────────────────────────────────────
+
+    /// Return the [`RecoveryMetadata`] for a failed transaction, if available.
+    ///
+    /// Returns `None` when the transaction does not exist, has not yet failed,
+    /// or was failed without recovery metadata (legacy records).
+    ///
+    /// # Arguments
+    ///
+    /// * `transaction_id` - The ID of the transaction to inspect.
+    /// * `env` - The Soroban execution environment.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use soroban_sdk::{Env, String};
+    /// # use soroban_sdk::testutils::Address as _;
+    /// # let env = Env::default();
+    /// # let initiator = soroban_sdk::Address::generate(&env);
+    /// use anchorkit::transaction_state_tracker::{TransactionStateTracker, TransactionState};
+    ///
+    /// let mut tracker = TransactionStateTracker::new(true);
+    /// tracker.create_transaction(1, initiator, &env).unwrap();
+    /// tracker.start_transaction(1, &env).unwrap();
+    /// tracker.fail_transaction(1, String::from_str(&env, "timeout"), &env).unwrap();
+    ///
+    /// let meta = tracker.get_recovery_metadata(1, &env).unwrap();
+    /// assert!(meta.is_some());
+    /// assert_eq!(meta.unwrap().failed_from_state, TransactionState::InProgress);
+    /// ```
+    pub fn get_recovery_metadata(
+        &self,
+        transaction_id: u64,
+        env: &Env,
+    ) -> Result<Option<RecoveryMetadata>, String> {
+        let record = self.get_transaction_state(transaction_id, env)?;
+        Ok(record.and_then(|r| r.recovery_metadata))
+    }
+
+    /// Returns `true` when the transaction is in the [`Failed`](TransactionState::Failed)
+    /// state and therefore eligible for a recovery attempt.
+    ///
+    /// A transaction is considered recoverable if it has failed but has not yet
+    /// exceeded an operator-defined retry ceiling (checked externally).
+    ///
+    /// # Arguments
+    ///
+    /// * `transaction_id` - The ID of the transaction to inspect.
+    /// * `env` - The Soroban execution environment.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use soroban_sdk::{Env, String};
+    /// # use soroban_sdk::testutils::Address as _;
+    /// # let env = Env::default();
+    /// # let initiator = soroban_sdk::Address::generate(&env);
+    /// use anchorkit::transaction_state_tracker::TransactionStateTracker;
+    ///
+    /// let mut tracker = TransactionStateTracker::new(true);
+    /// tracker.create_transaction(1, initiator, &env).unwrap();
+    /// tracker.start_transaction(1, &env).unwrap();
+    /// tracker.fail_transaction(1, String::from_str(&env, "err"), &env).unwrap();
+    ///
+    /// assert!(tracker.is_recoverable(1, &env).unwrap());
+    /// ```
+    pub fn is_recoverable(
+        &self,
+        transaction_id: u64,
+        env: &Env,
+    ) -> Result<bool, String> {
+        let record = self.get_transaction_state(transaction_id, env)?;
+        Ok(record.map(|r| r.state == TransactionState::Failed).unwrap_or(false))
+    }
+
+    /// Increment the `retry_count` on the recovery metadata of a failed transaction.
+    ///
+    /// This is a lightweight bookkeeping call that operators invoke each time they
+    /// attempt to recover a failed transaction. It does **not** change the
+    /// transaction state — use [`start_transaction`](Self::start_transaction) or
+    /// [`advance_transaction_state`](Self::advance_transaction_state) for that.
+    ///
+    /// # Arguments
+    ///
+    /// * `transaction_id` - The ID of the failed transaction.
+    /// * `env` - The Soroban execution environment.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the transaction is not found or is not in the
+    /// [`Failed`](TransactionState::Failed) state.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use soroban_sdk::{Env, String};
+    /// # use soroban_sdk::testutils::Address as _;
+    /// # let env = Env::default();
+    /// # let initiator = soroban_sdk::Address::generate(&env);
+    /// use anchorkit::transaction_state_tracker::TransactionStateTracker;
+    ///
+    /// let mut tracker = TransactionStateTracker::new(true);
+    /// tracker.create_transaction(1, initiator, &env).unwrap();
+    /// tracker.start_transaction(1, &env).unwrap();
+    /// tracker.fail_transaction(1, String::from_str(&env, "err"), &env).unwrap();
+    ///
+    /// tracker.record_recovery_attempt(1, &env).unwrap();
+    /// let meta = tracker.get_recovery_metadata(1, &env).unwrap().unwrap();
+    /// assert_eq!(meta.retry_count, 1);
+    /// ```
+    pub fn record_recovery_attempt(
+        &mut self,
+        transaction_id: u64,
+        env: &Env,
+    ) -> Result<(), String> {
+        if self.is_dev_mode {
+            for record in self.cache.iter_mut() {
+                if record.transaction_id == transaction_id {
+                    if record.state != TransactionState::Failed {
+                        return Err(String::from_str(
+                            env,
+                            "record_recovery_attempt requires a Failed transaction",
+                        ));
+                    }
+                    match record.recovery_metadata.as_mut() {
+                        Some(meta) => meta.retry_count += 1,
+                        None => {
+                            return Err(String::from_str(
+                                env,
+                                "Transaction has no recovery metadata",
+                            ))
+                        }
+                    }
+                    return Ok(());
+                }
+            }
+            return Err(String::from_str(env, "Transaction not found in cache"));
+        } else {
+            let key = (symbol_short!("TXSTATE"), transaction_id);
+            let mut record: TransactionStateRecord = env
+                .storage()
+                .persistent()
+                .get(&key)
+                .ok_or_else(|| String::from_str(env, "Transaction not found"))?;
+
+            if record.state != TransactionState::Failed {
+                return Err(String::from_str(
+                    env,
+                    "record_recovery_attempt requires a Failed transaction",
+                ));
+            }
+            match record.recovery_metadata.as_mut() {
+                Some(meta) => meta.retry_count += 1,
+                None => {
+                    return Err(String::from_str(
+                        env,
+                        "Transaction has no recovery metadata",
+                    ))
+                }
+            }
+            env.storage().persistent().set(&key, &record);
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, TXSTATE_TTL, TXSTATE_TTL);
+            Ok(())
+        }
+    }
+
+    /// Return all failed transactions (dev mode only).
+    ///
+    /// Convenience wrapper around [`get_transactions_by_state`](Self::get_transactions_by_state)
+    /// that filters for [`Failed`](TransactionState::Failed) records and is
+    /// named explicitly for recovery workflows.
+    ///
+    /// # Returns
+    ///
+    /// A `Vec` of [`TransactionStateRecord`]s whose state is `Failed`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use soroban_sdk::{Env, String};
+    /// # use soroban_sdk::testutils::Address as _;
+    /// # let env = Env::default();
+    /// # let initiator = soroban_sdk::Address::generate(&env);
+    /// use anchorkit::transaction_state_tracker::TransactionStateTracker;
+    ///
+    /// let mut tracker = TransactionStateTracker::new(true);
+    /// tracker.create_transaction(1, initiator.clone(), &env).unwrap();
+    /// tracker.start_transaction(1, &env).unwrap();
+    /// tracker.fail_transaction(1, String::from_str(&env, "err"), &env).unwrap();
+    ///
+    /// let failed = tracker.get_failed_transactions().unwrap();
+    /// assert_eq!(failed.len(), 1);
+    /// assert!(failed[0].recovery_metadata.is_some());
+    /// ```
+    pub fn get_failed_transactions(
+        &self,
+    ) -> Result<alloc::vec::Vec<TransactionStateRecord>, String> {
+        self.get_transactions_by_state(TransactionState::Failed)
+    }
+
     // ── TTL helpers ──────────────────────────────────────────────────────────
 
     /// Read the configurable active TTL from contract storage (production) or
@@ -1009,15 +1338,43 @@ mod tests {
 
     #[test]
     fn test_is_valid_transition() {
+        // ── Valid forward transitions ────────────────────────────────────────
         assert!(TransactionState::Pending.is_valid_transition(TransactionState::InProgress));
+        assert!(TransactionState::Pending.is_valid_transition(TransactionState::Failed));
         assert!(TransactionState::InProgress.is_valid_transition(TransactionState::Completed));
         assert!(TransactionState::InProgress.is_valid_transition(TransactionState::Failed));
 
-        assert!(!TransactionState::Pending.is_valid_transition(TransactionState::Completed));
-        assert!(!TransactionState::Pending.is_valid_transition(TransactionState::Failed));
+        // ── Terminal states cannot transition further ─────────────────────────
         assert!(!TransactionState::Completed.is_valid_transition(TransactionState::InProgress));
-        assert!(!TransactionState::Failed.is_valid_transition(TransactionState::InProgress));
         assert!(!TransactionState::Completed.is_valid_transition(TransactionState::Pending));
+        assert!(!TransactionState::Completed.is_valid_transition(TransactionState::Failed));
+        assert!(!TransactionState::Completed.is_valid_transition(TransactionState::Completed));
+        assert!(!TransactionState::Failed.is_valid_transition(TransactionState::InProgress));
+        assert!(!TransactionState::Failed.is_valid_transition(TransactionState::Pending));
+        assert!(!TransactionState::Failed.is_valid_transition(TransactionState::Completed));
+        assert!(!TransactionState::Failed.is_valid_transition(TransactionState::Failed));
+
+        // ── Backward and skip transitions are rejected ────────────────────────
+        assert!(!TransactionState::Pending.is_valid_transition(TransactionState::Completed));
+        assert!(!TransactionState::Pending.is_valid_transition(TransactionState::Pending));
+        assert!(!TransactionState::InProgress.is_valid_transition(TransactionState::Pending));
+        assert!(!TransactionState::InProgress.is_valid_transition(TransactionState::InProgress));
+    }
+
+    #[test]
+    fn test_is_terminal() {
+        assert!(TransactionState::Completed.is_terminal());
+        assert!(TransactionState::Failed.is_terminal());
+        assert!(!TransactionState::Pending.is_terminal());
+        assert!(!TransactionState::InProgress.is_terminal());
+    }
+
+    #[test]
+    fn test_illegal_transition_message_format() {
+        let msg = TransactionState::Completed.illegal_transition_message(TransactionState::Pending);
+        assert!(msg.starts_with("[E24]"), "message must carry [E24] prefix: {msg}");
+        assert!(msg.contains("completed"), "message must name the from-state: {msg}");
+        assert!(msg.contains("pending"), "message must name the to-state: {msg}");
     }
 
     #[test]

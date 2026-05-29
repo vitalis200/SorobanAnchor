@@ -6,7 +6,9 @@ mod anchor_info_discovery_tests {
         Address, Env, String, Vec,
     };
 
-    use crate::contract::{AnchorKitContract, AnchorKitContractClient, AssetInfo, StellarToml};
+    use anchorkit::contract::{
+        AnchorKitContract, AnchorKitContractClient, AssetInfo, RefreshStatus, StellarToml,
+    };
 
     fn make_env() -> Env {
         let env = Env::default();
@@ -277,8 +279,13 @@ mod anchor_info_discovery_tests {
 
         client.refresh_anchor_info(&anchor);
 
-        let result = client.try_get_anchor_toml(&anchor);
-        assert!(result.is_err());
+        let toml = client.get_anchor_toml(&anchor);
+        assert_eq!(toml.version, String::from_str(&env, "2.0.0"));
+
+        let diagnostic =
+            client.get_refresh_diagnostic(&anchor, &String::from_str(&env, "anchor_info"));
+        assert_eq!(diagnostic.status, RefreshStatus::Failed);
+        assert!(diagnostic.had_cached_entry);
     }
 
     #[test]
@@ -593,4 +600,3 @@ mod anchor_info_discovery_tests {
         assert_eq!(info.deposit_max_amount, 0);
     }
 }
-

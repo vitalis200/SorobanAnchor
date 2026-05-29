@@ -289,6 +289,318 @@ mod transaction_state_tracker_tests {
         assert_eq!(entry.to_state, TransactionState::Completed);
         assert!(!entry.success);
     }
+
+    // -----------------------------------------------------------------------
+    // Invalid transition rejection — exhaustive matrix
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_completed_to_pending_rejected() {
+        let env = Env::default();
+        let mut tracker = TransactionStateTracker::new(true);
+        let initiator = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+        tracker.create_transaction(1, initiator, &env).ok();
+        tracker.start_transaction(1, &env).ok();
+        tracker.complete_transaction(1, &env).ok();
+
+        let r = tracker.advance_transaction_state(1, TransactionState::Pending, &env);
+        assert!(r.is_err(), "Completed → Pending must be rejected");
+    }
+
+    #[test]
+    fn test_completed_to_in_progress_rejected() {
+        let env = Env::default();
+        let mut tracker = TransactionStateTracker::new(true);
+        let initiator = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+        tracker.create_transaction(1, initiator, &env).ok();
+        tracker.start_transaction(1, &env).ok();
+        tracker.complete_transaction(1, &env).ok();
+
+        let r = tracker.advance_transaction_state(1, TransactionState::InProgress, &env);
+        assert!(r.is_err(), "Completed → InProgress must be rejected");
+    }
+
+    #[test]
+    fn test_completed_to_failed_rejected() {
+        let env = Env::default();
+        let mut tracker = TransactionStateTracker::new(true);
+        let initiator = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+        tracker.create_transaction(1, initiator, &env).ok();
+        tracker.start_transaction(1, &env).ok();
+        tracker.complete_transaction(1, &env).ok();
+
+        let r = tracker.fail_transaction(1, String::from_str(&env, "late failure"), &env);
+        assert!(r.is_err(), "Completed → Failed must be rejected");
+    }
+
+    #[test]
+    fn test_failed_to_in_progress_rejected() {
+        let env = Env::default();
+        let mut tracker = TransactionStateTracker::new(true);
+        let initiator = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+        tracker.create_transaction(1, initiator, &env).ok();
+        tracker.start_transaction(1, &env).ok();
+        tracker.fail_transaction(1, String::from_str(&env, "err"), &env).ok();
+
+        let r = tracker.advance_transaction_state(1, TransactionState::InProgress, &env);
+        assert!(r.is_err(), "Failed → InProgress must be rejected");
+    }
+
+    #[test]
+    fn test_failed_to_completed_rejected() {
+        let env = Env::default();
+        let mut tracker = TransactionStateTracker::new(true);
+        let initiator = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+        tracker.create_transaction(1, initiator, &env).ok();
+        tracker.start_transaction(1, &env).ok();
+        tracker.fail_transaction(1, String::from_str(&env, "err"), &env).ok();
+
+        let r = tracker.complete_transaction(1, &env);
+        assert!(r.is_err(), "Failed → Completed must be rejected");
+    }
+
+    #[test]
+    fn test_failed_to_failed_rejected() {
+        let env = Env::default();
+        let mut tracker = TransactionStateTracker::new(true);
+        let initiator = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+        tracker.create_transaction(1, initiator, &env).ok();
+        tracker.start_transaction(1, &env).ok();
+        tracker.fail_transaction(1, String::from_str(&env, "first failure"), &env).ok();
+
+        let r = tracker.fail_transaction(1, String::from_str(&env, "second failure"), &env);
+        assert!(r.is_err(), "Failed → Failed must be rejected");
+    }
+
+    #[test]
+    fn test_pending_to_completed_directly_rejected() {
+        let env = Env::default();
+        let mut tracker = TransactionStateTracker::new(true);
+        let initiator = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+        tracker.create_transaction(1, initiator, &env).ok();
+
+        let r = tracker.complete_transaction(1, &env);
+        assert!(r.is_err(), "Pending → Completed must be rejected");
+    }
+
+    #[test]
+    fn test_pending_to_in_progress_to_failed_valid() {
+        let env = Env::default();
+        let mut tracker = TransactionStateTracker::new(true);
+        let initiator = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+        tracker.create_transaction(1, initiator, &env).ok();
+        tracker.start_transaction(1, &env).ok();
+
+        let r = tracker.fail_transaction(1, String::from_str(&env, "mid-flight error"), &env);
+        assert!(r.is_ok(), "InProgress → Failed must be accepted");
+        assert_eq!(r.unwrap().state, TransactionState::Failed);
+    }
+
+    #[test]
+    fn test_pending_to_failed_directly_valid() {
+        // Pending → Failed is a valid transition (immediate pre-processing failure)
+        let env = Env::default();
+        let mut tracker = TransactionStateTracker::new(true);
+        let initiator = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+        tracker.create_transaction(1, initiator, &env).ok();
+
+        let r = tracker.fail_transaction(1, String::from_str(&env, "pre-processing failure"), &env);
+        assert!(r.is_ok(), "Pending → Failed must be accepted");
+        let record = r.unwrap();
+        assert_eq!(record.state, TransactionState::Failed);
+        assert!(record.recovery_metadata.is_some());
+        let meta = record.recovery_metadata.unwrap();
+        assert_eq!(meta.failed_from_state, TransactionState::Pending);
+    }
+
+    // -----------------------------------------------------------------------
+    // Invalid transition error message format
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_invalid_transition_error_carries_e24_prefix() {
+        let env = Env::default();
+        let mut tracker = TransactionStateTracker::new(true);
+        let initiator = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+        tracker.create_transaction(1, initiator, &env).ok();
+        tracker.start_transaction(1, &env).ok();
+        tracker.complete_transaction(1, &env).ok();
+
+        let err = tracker
+            .advance_transaction_state(1, TransactionState::Pending, &env)
+            .unwrap_err();
+        let err_str = err.to_string();
+        assert!(
+            err_str.contains("[E24]"),
+            "error message must carry [E24] prefix, got: {err_str}"
+        );
+        assert!(
+            err_str.contains("completed"),
+            "error message must name the from-state, got: {err_str}"
+        );
+        assert!(
+            err_str.contains("pending"),
+            "error message must name the to-state, got: {err_str}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Recovery metadata
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_recovery_metadata_populated_on_failure() {
+        let env = Env::default();
+        let mut tracker = TransactionStateTracker::new(true);
+        let initiator = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+        tracker.create_transaction(1, initiator, &env).ok();
+        tracker.start_transaction(1, &env).ok();
+
+        let reason = String::from_str(&env, "network timeout");
+        let record = tracker.fail_transaction(1, reason.clone(), &env).unwrap();
+
+        assert!(record.recovery_metadata.is_some(), "recovery_metadata must be set on failure");
+        let meta = record.recovery_metadata.unwrap();
+        assert_eq!(meta.failure_reason, reason, "failure_reason must match the error message");
+        assert_eq!(meta.failed_from_state, TransactionState::InProgress);
+        assert_eq!(meta.retry_count, 0);
+        assert!(meta.last_updated_ledger > 0, "last_updated_ledger must be non-zero");
+    }
+
+    #[test]
+    fn test_recovery_metadata_absent_on_success() {
+        let env = Env::default();
+        let mut tracker = TransactionStateTracker::new(true);
+        let initiator = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+        tracker.create_transaction(1, initiator, &env).ok();
+        tracker.start_transaction(1, &env).ok();
+        let record = tracker.complete_transaction(1, &env).unwrap();
+
+        assert!(record.recovery_metadata.is_none(), "recovery_metadata must be None for Completed");
+    }
+
+    #[test]
+    fn test_get_recovery_metadata_returns_metadata() {
+        let env = Env::default();
+        let mut tracker = TransactionStateTracker::new(true);
+        let initiator = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+        tracker.create_transaction(1, initiator, &env).ok();
+        tracker.start_transaction(1, &env).ok();
+        tracker.fail_transaction(1, String::from_str(&env, "timeout"), &env).ok();
+
+        let meta = tracker.get_recovery_metadata(1, &env).unwrap();
+        assert!(meta.is_some());
+        let meta = meta.unwrap();
+        assert_eq!(meta.failed_from_state, TransactionState::InProgress);
+        assert_eq!(meta.retry_count, 0);
+    }
+
+    #[test]
+    fn test_get_recovery_metadata_none_for_non_failed() {
+        let env = Env::default();
+        let mut tracker = TransactionStateTracker::new(true);
+        let initiator = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+        tracker.create_transaction(1, initiator, &env).ok();
+
+        let meta = tracker.get_recovery_metadata(1, &env).unwrap();
+        assert!(meta.is_none(), "recovery_metadata must be None for Pending");
+    }
+
+    #[test]
+    fn test_is_recoverable_true_for_failed() {
+        let env = Env::default();
+        let mut tracker = TransactionStateTracker::new(true);
+        let initiator = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+        tracker.create_transaction(1, initiator, &env).ok();
+        tracker.start_transaction(1, &env).ok();
+        tracker.fail_transaction(1, String::from_str(&env, "err"), &env).ok();
+
+        assert!(tracker.is_recoverable(1, &env).unwrap());
+    }
+
+    #[test]
+    fn test_is_recoverable_false_for_completed() {
+        let env = Env::default();
+        let mut tracker = TransactionStateTracker::new(true);
+        let initiator = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+        tracker.create_transaction(1, initiator, &env).ok();
+        tracker.start_transaction(1, &env).ok();
+        tracker.complete_transaction(1, &env).ok();
+
+        assert!(!tracker.is_recoverable(1, &env).unwrap());
+    }
+
+    #[test]
+    fn test_record_recovery_attempt_increments_retry_count() {
+        let env = Env::default();
+        let mut tracker = TransactionStateTracker::new(true);
+        let initiator = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+        tracker.create_transaction(1, initiator, &env).ok();
+        tracker.start_transaction(1, &env).ok();
+        tracker.fail_transaction(1, String::from_str(&env, "err"), &env).ok();
+
+        tracker.record_recovery_attempt(1, &env).unwrap();
+        tracker.record_recovery_attempt(1, &env).unwrap();
+
+        let meta = tracker.get_recovery_metadata(1, &env).unwrap().unwrap();
+        assert_eq!(meta.retry_count, 2);
+    }
+
+    #[test]
+    fn test_record_recovery_attempt_on_non_failed_returns_error() {
+        let env = Env::default();
+        let mut tracker = TransactionStateTracker::new(true);
+        let initiator = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+        tracker.create_transaction(1, initiator, &env).ok();
+        tracker.start_transaction(1, &env).ok();
+
+        // Transaction is InProgress, not Failed — must return an error
+        let r = tracker.record_recovery_attempt(1, &env);
+        assert!(r.is_err(), "record_recovery_attempt on non-Failed tx must return error");
+    }
+
+    #[test]
+    fn test_get_failed_transactions_returns_only_failed() {
+        let env = Env::default();
+        let mut tracker = TransactionStateTracker::new(true);
+        let initiator = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+
+        tracker.create_transaction(1, initiator.clone(), &env).ok();
+        tracker.create_transaction(2, initiator.clone(), &env).ok();
+        tracker.create_transaction(3, initiator.clone(), &env).ok();
+
+        tracker.start_transaction(1, &env).ok();
+        tracker.fail_transaction(1, String::from_str(&env, "err"), &env).ok();
+        tracker.start_transaction(2, &env).ok();
+        tracker.complete_transaction(2, &env).ok();
+        // tx 3 stays Pending
+
+        let failed = tracker.get_failed_transactions().unwrap();
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].transaction_id, 1);
+        assert!(failed[0].recovery_metadata.is_some());
+    }
+
+    // -----------------------------------------------------------------------
+    // Audit log integrity after mixed transitions
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_audit_log_mixed_success_and_failure() {
+        let env = Env::default();
+        let mut tracker = TransactionStateTracker::new(true);
+        let initiator = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+
+        tracker.create_transaction(1, initiator, &env).ok();
+        tracker.start_transaction(1, &env).ok();                                    // success
+        let _ = tracker.advance_transaction_state(1, TransactionState::Pending, &env); // failure
+        tracker.complete_transaction(1, &env).ok();                                 // success
+
+        assert_eq!(tracker.audit_log.len(), 3);
+        assert!(tracker.audit_log[0].success);
+        assert!(!tracker.audit_log[1].success);
+        assert!(tracker.audit_log[2].success);
+    }
 }
 
 #[cfg(test)]

@@ -8,6 +8,7 @@ mod metadata_cache_tests {
 
     use anchorkit::contract::{
         AnchorKitContract, AnchorKitContractClient, AnchorMetadata, MetadataCacheState,
+        RefreshStatus,
     };
 
     fn make_env() -> Env {
@@ -112,12 +113,17 @@ mod metadata_cache_tests {
         // verify it's there
         let _ = client.get_cached_metadata(&anchor);
 
-        // refresh (invalidate)
+        // Refresh discovery failed before replacement data was available, so
+        // the last-known-good metadata remains in cache.
         client.refresh_metadata_cache(&anchor);
 
-        // now it should be gone
-        let result = client.try_get_cached_metadata(&anchor);
-        assert!(result.is_err());
+        let retrieved = client.get_cached_metadata(&anchor);
+        assert_eq!(retrieved.reputation_score, 9000);
+
+        let diagnostic =
+            client.get_refresh_diagnostic(&anchor, &String::from_str(&env, "metadata"));
+        assert_eq!(diagnostic.status, RefreshStatus::Failed);
+        assert!(diagnostic.had_cached_entry);
     }
 
     #[test]
@@ -177,8 +183,13 @@ mod metadata_cache_tests {
 
         client.refresh_capabilities_cache(&anchor);
 
-        let result = client.try_get_cached_capabilities(&anchor);
-        assert!(result.is_err());
+        let cached = client.get_cached_capabilities(&anchor);
+        assert_eq!(cached.capabilities, caps);
+
+        let diagnostic =
+            client.get_refresh_diagnostic(&anchor, &String::from_str(&env, "capabilities"));
+        assert_eq!(diagnostic.status, RefreshStatus::Failed);
+        assert!(diagnostic.had_cached_entry);
     }
 
     // -----------------------------------------------------------------------
@@ -461,4 +472,3 @@ mod metadata_cache_tests {
         assert!(!needs_refresh);
     }
 }
-

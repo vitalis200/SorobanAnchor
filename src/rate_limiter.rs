@@ -3,7 +3,8 @@
 //! This module implements per-attestor rate limiting for attestation submissions
 //! to prevent spam and abuse of the contract.
 
-use soroban_sdk::{contracttype, Address, Env};
+use soroban_sdk::{contracttype, xdr::ToXdr, Address, Env};
+use crate::deterministic_hash::make_storage_key;
 use crate::errors::AnchorKitError;
 #[cfg(test)]
 use crate::errors::ErrorCode;
@@ -244,7 +245,6 @@ impl RateLimiter {
     /// Generate collision-resistant storage key for per-attestor rate limit state.
     fn get_state_key(env: &Env, attestor: &Address) -> soroban_sdk::BytesN<32> {
         let addr_xdr = attestor.clone().to_xdr(env);
-        let mut addr_bytes = soroban_sdk::vec![env];
         // collect xdr bytes into a plain slice via Bytes
         let mut raw = alloc::vec::Vec::with_capacity(addr_xdr.len() as usize);
         for i in 0..addr_xdr.len() {

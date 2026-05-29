@@ -7,6 +7,7 @@ extern crate alloc;
 use alloc::string::String;
 
 use crate::errors::Error;
+use crate::errors::normalize_asset_code;
 
 // ── Normalized response types ────────────────────────────────────────────────
 
@@ -138,6 +139,8 @@ pub struct DepositResponse {
     pub stellar_memo: Option<String>,
     /// Type of `stellar_memo` (e.g. `"text"`, `"id"`, `"hash"`), if provided.
     pub stellar_memo_type: Option<String>,
+    /// Normalized (uppercase) asset code, if provided.
+    pub asset_code: Option<String>,
 }
 
 /// Normalized response for a withdrawal initiation.
@@ -159,6 +162,8 @@ pub struct WithdrawalResponse {
     pub fee_fixed: Option<u64>,
     /// Current status of the transaction.
     pub status: TransactionStatus,
+    /// Normalized (uppercase) asset code, if provided.
+    pub asset_code: Option<String>,
 }
 
 /// Normalized transaction status response.
@@ -242,6 +247,8 @@ pub struct RawDepositResponse {
     pub stellar_memo: Option<String>,
     /// Type of `stellar_memo`.
     pub stellar_memo_type: Option<String>,
+    /// Asset code for this deposit (e.g. `"USDC"`). Normalized to uppercase.
+    pub asset_code: Option<String>,
 }
 
 /// Raw fields from an anchor's `/withdraw` response.
@@ -254,6 +261,8 @@ pub struct RawWithdrawalResponse {
     pub max_amount: Option<u64>,
     pub fee_fixed: Option<u64>,
     pub status: Option<String>,
+    /// Asset code for this withdrawal (e.g. `"USDC"`). Normalized to uppercase.
+    pub asset_code: Option<String>,
 }
 
 /// Raw fields from an anchor's `/transaction` response.
@@ -302,15 +311,20 @@ pub struct RawTransactionResponse {
 ///     clawback_enabled: None,
 ///     stellar_memo: None,
 ///     stellar_memo_type: None,
+///     asset_code: Some("usdc".into()),
 /// };
 /// let resp = initiate_deposit(raw).unwrap();
 /// assert_eq!(resp.transaction_id, "txn-001");
 /// assert_eq!(resp.status, TransactionStatus::PendingExternal);
+/// assert_eq!(resp.asset_code, Some("USDC".into()));
 /// ```
 pub fn initiate_deposit(raw: RawDepositResponse) -> Result<DepositResponse, Error> {
     if raw.transaction_id.is_empty() || raw.how.is_empty() {
         return Err(Error::invalid_transaction_intent());
     }
+    let asset_code = raw.asset_code.as_deref()
+        .map(normalize_asset_code)
+        .transpose()?;
 
     Ok(DepositResponse {
         transaction_id: raw.transaction_id,
@@ -327,6 +341,7 @@ pub fn initiate_deposit(raw: RawDepositResponse) -> Result<DepositResponse, Erro
         clawback_enabled: raw.clawback_enabled,
         stellar_memo: raw.stellar_memo,
         stellar_memo_type: raw.stellar_memo_type,
+        asset_code,
     })
 }
 
@@ -361,6 +376,7 @@ pub fn initiate_deposit(raw: RawDepositResponse) -> Result<DepositResponse, Erro
 ///     max_amount: None,
 ///     fee_fixed: None,
 ///     status: Some("pending_user".into()),
+///     asset_code: None,
 /// };
 /// let resp = initiate_withdrawal(raw).unwrap();
 /// assert_eq!(resp.status, TransactionStatus::PendingUser);
@@ -369,6 +385,9 @@ pub fn initiate_withdrawal(raw: RawWithdrawalResponse) -> Result<WithdrawalRespo
     if raw.transaction_id.is_empty() || raw.account_id.is_empty() {
         return Err(Error::invalid_transaction_intent());
     }
+    let asset_code = raw.asset_code.as_deref()
+        .map(normalize_asset_code)
+        .transpose()?;
 
     Ok(WithdrawalResponse {
         transaction_id: raw.transaction_id,
@@ -383,6 +402,7 @@ pub fn initiate_withdrawal(raw: RawWithdrawalResponse) -> Result<WithdrawalRespo
             .as_deref()
             .map(TransactionStatus::from_str)
             .unwrap_or(TransactionStatus::Pending),
+        asset_code,
     })
 }
 
@@ -616,6 +636,7 @@ mod tests {
             clawback_enabled: None,
             stellar_memo: None,
             stellar_memo_type: None,
+            asset_code: None,
         }
     }
 
@@ -629,6 +650,7 @@ mod tests {
             max_amount: Some(5_000),
             fee_fixed: Some(2),
             status: Some("pending_user".to_string()),
+            asset_code: None,
         }
     }
 

@@ -8,6 +8,7 @@ use alloc::string::String;
 
 use crate::domain_validator::validate_anchor_domain;
 use crate::errors::{AnchorKitError, ErrorCode};
+use crate::errors::normalize_asset_code;
 use crate::sep6::TransactionStatus;
 
 /// Raw response from anchor's `/transactions/deposit/interactive` endpoint.
@@ -31,6 +32,8 @@ pub struct RawSep24TransactionResponse {
     pub status: String,
     pub more_info_url: Option<String>,
     pub stellar_transaction_id: Option<String>,
+    /// Asset code for this transaction (e.g. `"USDC"`). Normalized to uppercase.
+    pub asset_code: Option<String>,
 }
 
 /// Normalized response for interactive deposit initiation.
@@ -62,6 +65,8 @@ pub struct Sep24TransactionStatusResponse {
     pub more_info_url: Option<String>,
     /// Stellar transaction ID if available (SEP-24 specific).
     pub stellar_transaction_id: Option<String>,
+    /// Normalized (uppercase) asset code, if provided.
+    pub asset_code: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -249,6 +254,7 @@ pub fn initiate_interactive_withdrawal(
 ///     status: "completed".into(),
 ///     more_info_url: Some("https://anchor.example.com/tx/tx-789".into()),
 ///     stellar_transaction_id: Some("stellar-tx-123".into()),
+///     asset_code: None,
 /// };
 /// let resp = fetch_sep24_transaction_status(raw).unwrap();
 /// assert_eq!(resp.status, TransactionStatus::Completed);
@@ -272,12 +278,16 @@ pub fn fetch_sep24_transaction_status(
     if let Some(ref url) = raw.more_info_url {
         validate_interactive_url(url)?;
     }
+    let asset_code = raw.asset_code.as_deref()
+        .map(normalize_asset_code)
+        .transpose()?;
 
     Ok(Sep24TransactionStatusResponse {
         id: raw.id,
         status: TransactionStatus::from_str(&raw.status),
         more_info_url: raw.more_info_url,
         stellar_transaction_id: raw.stellar_transaction_id,
+        asset_code,
     })
 }
 
@@ -497,6 +507,7 @@ mod tests {
             status: "completed".to_string(),
             more_info_url: Some("https://anchor.example.com/tx/tx-789".to_string()),
             stellar_transaction_id: Some("stellar-tx-123".to_string()),
+            asset_code: None,
         };
         let result = fetch_sep24_transaction_status(raw).unwrap();
         assert_eq!(result.id, "tx-789");
@@ -518,6 +529,7 @@ mod tests {
             status: "completed".to_string(),
             more_info_url: Some("http://anchor.example.com/tx/tx-789".to_string()),
             stellar_transaction_id: None,
+            asset_code: None,
         };
         assert!(fetch_sep24_transaction_status(raw).is_err());
     }
@@ -529,6 +541,7 @@ mod tests {
             status: "completed".to_string(),
             more_info_url: Some("/tx/tx-789".to_string()),
             stellar_transaction_id: None,
+            asset_code: None,
         };
         assert!(fetch_sep24_transaction_status(raw).is_err());
     }
@@ -540,6 +553,7 @@ mod tests {
             status: "completed".to_string(),
             more_info_url: None,
             stellar_transaction_id: None,
+            asset_code: None,
         };
         assert!(fetch_sep24_transaction_status(raw).is_ok());
     }
@@ -551,6 +565,7 @@ mod tests {
             status: "completed".to_string(),
             more_info_url: None,
             stellar_transaction_id: None,
+            asset_code: None,
         };
         assert!(fetch_sep24_transaction_status(raw).is_err());
     }
@@ -562,6 +577,7 @@ mod tests {
             status: "".to_string(),
             more_info_url: None,
             stellar_transaction_id: None,
+            asset_code: None,
         };
         assert!(fetch_sep24_transaction_status(raw).is_err());
     }
@@ -573,6 +589,7 @@ mod tests {
             status: "pending_user".to_string(),
             more_info_url: None,
             stellar_transaction_id: None,
+            asset_code: None,
         };
         let result = fetch_sep24_transaction_status(raw).unwrap();
         assert_eq!(result.status, TransactionStatus::PendingUser);

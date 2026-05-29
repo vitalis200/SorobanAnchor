@@ -7,6 +7,7 @@ extern crate alloc;
 use alloc::string::String;
 
 use crate::errors::Error;
+use crate::errors::normalize_asset_code;
 
 // ── Normalized response types ────────────────────────────────────────────────
 
@@ -48,9 +49,13 @@ pub struct Price {
 ///     price: "0.15".into(),
 ///     sell_amount: "1000".into(),
 ///     buy_amount: "150".into(),
+///     sell_asset: "xlm".into(),
+///     buy_asset: "usdc".into(),
 /// };
-/// let quote = request_firm_quote(raw).unwrap();
+/// let quote = request_firm_quote(raw, 0).unwrap();
 /// assert_eq!(quote.id, "quote-123");
+/// assert_eq!(quote.sell_asset, "XLM");
+/// assert_eq!(quote.buy_asset, "USDC");
 /// ```
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FirmQuote {
@@ -60,6 +65,10 @@ pub struct FirmQuote {
     pub price: String,
     pub sell_amount: String,
     pub buy_amount: String,
+    /// Normalized (uppercase) asset code being sold.
+    pub sell_asset: String,
+    /// Normalized (uppercase) asset code being bought.
+    pub buy_asset: String,
 }
 
 // ── Raw response types (from anchor APIs) ────────────────────────────────────
@@ -81,6 +90,10 @@ pub struct RawFirmQuote {
     pub price: String,
     pub sell_amount: String,
     pub buy_amount: String,
+    /// Asset code being sold (e.g. `"XLM"`). Normalized to uppercase.
+    pub sell_asset: String,
+    /// Asset code being bought (e.g. `"USDC"`). Normalized to uppercase.
+    pub buy_asset: String,
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -168,8 +181,8 @@ pub fn fetch_prices(raw: RawPrice) -> Result<Price, Error> {
         return Err(Error::invalid_quote());
     }
     Ok(Price {
-        buy_asset: raw.buy_asset,
-        sell_asset: raw.sell_asset,
+        buy_asset: normalize_asset_code(&raw.buy_asset)?,
+        sell_asset: normalize_asset_code(&raw.sell_asset)?,
         price: raw.price,
     })
 }
@@ -187,6 +200,8 @@ pub fn request_firm_quote(raw: RawFirmQuote, current_timestamp: u64) -> Result<F
         price: raw.price,
         sell_amount: raw.sell_amount,
         buy_amount: raw.buy_amount,
+        sell_asset: normalize_asset_code(&raw.sell_asset)?,
+        buy_asset: normalize_asset_code(&raw.buy_asset)?,
     })
 }
 
@@ -209,6 +224,8 @@ mod tests {
             price: "0.15".to_string(),
             sell_amount: "1000".to_string(),
             buy_amount: "150".to_string(),
+            sell_asset: "XLM".to_string(),
+            buy_asset: "USDC".to_string(),
         }
     }
 
@@ -333,6 +350,8 @@ mod tests {
             price: "0.15".to_string(),
             sell_amount: "1000".to_string(),
             buy_amount: "150".to_string(),
+            sell_asset: "XLM".to_string(),
+            buy_asset: "USDC".to_string(),
         };
         assert!(is_quote_expired(&quote, 2000));
     }
@@ -345,6 +364,8 @@ mod tests {
             price: "0.15".to_string(),
             sell_amount: "1000".to_string(),
             buy_amount: "150".to_string(),
+            sell_asset: "XLM".to_string(),
+            buy_asset: "USDC".to_string(),
         };
         assert!(!is_quote_expired(&quote, 1000));
     }
@@ -357,7 +378,52 @@ mod tests {
             price: "0.15".to_string(),
             sell_amount: "1000".to_string(),
             buy_amount: "150".to_string(),
+            sell_asset: "XLM".to_string(),
+            buy_asset: "USDC".to_string(),
         };
         assert!(is_quote_expired(&quote, 1500));
+    }
+
+    // ── asset code normalization ──────────────────────────────────────────────
+
+    #[test]
+    fn test_fetch_prices_normalizes_lowercase_codes() {
+        let raw = RawPrice {
+            buy_asset: "usdc".to_string(),
+            sell_asset: "xlm".to_string(),
+            price: "0.15".to_string(),
+        };
+        let result = fetch_prices(raw).unwrap();
+        assert_eq!(result.buy_asset, "USDC");
+        assert_eq!(result.sell_asset, "XLM");
+    }
+
+    #[test]
+    fn test_fetch_prices_invalid_buy_asset_rejected() {
+        let raw = RawPrice {
+            buy_asset: "BAD CODE".to_string(),
+            sell_asset: "XLM".to_string(),
+            price: "0.15".to_string(),
+        };
+        let err = fetch_prices(raw).unwrap_err();
+        assert_eq!(err.code, crate::errors::ErrorCode::InvalidAssetCode);
+    }
+
+    #[test]
+    fn test_request_firm_quote_normalizes_asset_codes() {
+        let mut raw = valid_raw("2000");
+        raw.sell_asset = "xlm".to_string();
+        raw.buy_asset = "usdc".to_string();
+        let result = request_firm_quote(raw, 1000).unwrap();
+        assert_eq!(result.sell_asset, "XLM");
+        assert_eq!(result.buy_asset, "USDC");
+    }
+
+    #[test]
+    fn test_request_firm_quote_invalid_sell_asset_rejected() {
+        let mut raw = valid_raw("2000");
+        raw.sell_asset = "TOOLONGCODE13".to_string();
+        let err = request_firm_quote(raw, 1000).unwrap_err();
+        assert_eq!(err.code, crate::errors::ErrorCode::InvalidAssetCode);
     }
 }
