@@ -102,6 +102,27 @@ Anchor configs live in `configs/` as JSON or TOML. Validate them with:
 
 Schema reference: `config_schema.json`
 
+### Attestor Roles
+
+SorobanAnchor supports 13 specialized attestor roles, each with specific permissions and responsibilities. For detailed information about each role, their permissions, and usage examples, see:
+
+**[Attestor Roles and Permissions Guide](docs/attestor-roles.md)**
+
+Supported roles:
+- `kyc-issuer` - KYC verification attestations
+- `transfer-verifier` - Fund transfer confirmations
+- `compliance-approver` - Manual compliance review
+- `rate-provider` - Exchange rate attestations
+- `attestor` - General-purpose attestations
+- `identity-verifier` - Identity verification for remittances
+- `settlement-bank` - Settlement operations
+- `corridor-manager` - Remittance corridor management
+- `compliance-checker` - Automated AML/CFT screening
+- `reserve-verifier` - Reserve auditing for stablecoins
+- `collateral-custodian` - Collateral management
+- `treasury-operator` - Mint/burn operations
+- `risk-analyst` - Risk monitoring and price feeds
+
 ## License
 
 MIT
