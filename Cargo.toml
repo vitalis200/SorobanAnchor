@@ -22,27 +22,51 @@ path = "examples/request_history_example.rs"
 [features]
 default = ["std"]
 # std: enables standard library support (networking, filesystem, threads).
-#      Enabled by default for native builds. Must be disabled for WASM targets.
-std = []
+#      Enabled by default for native builds. Incompatible with wasm feature.
+std = ["clap", "reqwest", "aes-gcm", "argon2", "rpassword", "rand/std"]
 # wasm: targets wasm32-unknown-unknown for Soroban on-chain deployment.
-#       Disables std, reqwest, and any host-only modules (main.rs CLI, examples).
+#       Disables std, CLI, and any host-only modules (main.rs, examples).
+#       Must be built with --no-default-features.
 #       Build with: cargo build --release --target wasm32-unknown-unknown --no-default-features --features wasm
 wasm = []
+
+# mock-only — Pre-built response fixtures for testing without a live anchor.
+#
+# Enables the `mock` module which exports:
+#   • mock_deposit_response()       — RawDepositResponse
+#   • mock_withdrawal_response()    — RawWithdrawalResponse
+#   • mock_transaction_response_pending() / _completed()
+#   • mock_interactive_deposit_response()
+#   • mock_interactive_withdrawal_response()
+#   • mock_sep24_transaction_pending() / _completed()
+#   • mock_price() / mock_firm_quote() — SEP-38 quotes
+#   • mock_anchor_capabilities()
+#
+# Safe to combine with `std`: `--features std,mock-only`
+# Never enable in production binaries.
 mock-only = []
+
+# stress-tests — Load-simulation integration test suite.
+#
+# Gates the `tests/load_simulation_tests.rs` file which runs high-concurrency
+# and throughput scenarios. Excluded from normal CI to avoid slowing PR checks.
+#
+# Run with: cargo test --features stress-tests
+# Safe to combine with other features.
 stress-tests = []
 
 [dependencies]
 soroban-sdk = "21.7.0"
-clap = { version = "4.5", features = ["derive", "env"] }
+clap = { version = "4.5", features = ["derive", "env"], optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.7"
-reqwest = { version = "0.12", features = ["blocking", "json"] }
-aes-gcm = { version = "0.10.3", features = ["aes"] }
-argon2 = { version = "0.5.3" }
+reqwest = { version = "0.12", features = ["blocking", "json"], optional = true }
+aes-gcm = { version = "0.10.3", features = ["aes"], optional = true }
+argon2 = { version = "0.5.3", optional = true }
 rand = { version = "0.8", features = ["std"] }
 base64 = { version = "0.22" }
-rpassword = { version = "7.3" }
+rpassword = { version = "7.3", optional = true }
 
 [build-dependencies]
 serde_json = "1"
@@ -56,6 +80,8 @@ ed25519-dalek = "2"
 rand = "0.8"
 criterion = { version = "0.5", features = ["html_reports"] }
 jsonschema = "0.17"
+assert_cmd = "2.0"
+predicates = "3.0"
 
 [profile.release]
 opt-level = "z"

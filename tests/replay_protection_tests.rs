@@ -1,5 +1,7 @@
 #![cfg(test)]
 
+mod sep10_test_util;
+
 mod replay_protection_tests {
     use soroban_sdk::{
         testutils::{Address as _, Ledger, LedgerInfo},

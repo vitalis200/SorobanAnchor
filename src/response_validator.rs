@@ -233,6 +233,69 @@ pub fn validate_quote_response(
     })
 }
 
+/// Decode a base32-encoded string into bytes.
+fn decode_base32(input: &[u8]) -> Option<alloc::vec::Vec<u8>> {
+    let mut buffer: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    let mut bits = 0u32;
+    let mut value = 0u32;
+    for &ch in input {
+        let val = decode_base32_value(ch)?;
+        value = (value << 5) | (val as u32);
+        bits += 5;
+        if bits >= 8 {
+            bits -= 8;
+            buffer.push(((value >> bits) & 0xFF) as u8);
+        }
+    }
+    if bits != 0 {
+        return None;
+    }
+    Some(buffer)
+}
+
+fn decode_base32_value(ch: u8) -> Option<u8> {
+    match ch {
+        b'A'..=b'Z' => Some(ch - b'A'),
+        b'2'..=b'7' => Some(ch - b'2' + 26),
+        _ => None,
+    }
+}
+
+fn is_valid_stellar_account_char(c: char) -> bool {
+    matches!(c, 'A'..='Z' | '2'..='7')
+}
+
+fn is_valid_stellar_strkey(account_id: &str) -> bool {
+    const ACCOUNT_ID_VERSION_BYTE: u8 = 6 << 3;
+    let decoded = match decode_base32(account_id.as_bytes()) {
+        Some(bytes) => bytes,
+        None => return false,
+    };
+    if decoded.len() != 35 {
+        return false;
+    }
+    if decoded[0] != ACCOUNT_ID_VERSION_BYTE {
+        return false;
+    }
+    let checksum = u16::from_le_bytes([decoded[33], decoded[34]]);
+    crc16_xmodem(&decoded[..33]) == checksum
+}
+
+fn crc16_xmodem(input: &[u8]) -> u16 {
+    let mut crc = 0u16;
+    for &byte in input {
+        crc ^= (byte as u16) << 8;
+        for _ in 0..8 {
+            crc = if (crc & 0x8000) != 0 {
+                (crc << 1) ^ 0x1021
+            } else {
+                crc << 1
+            };
+        }
+    }
+    crc
+}
+
 /// Validates a raw SEP-38 quote response, returning a typed [`Sep38QuoteResponse`]
 /// or [`Error::validation_error`] if any required field is missing or empty.
 ///
@@ -438,6 +501,40 @@ pub fn validate_stellar_asset(asset: &str) -> Result<(), Error> {
         return Err(Error::validation_error("asset issuer must be a 56-character Stellar address starting with G"));
     }
     Ok(())
+}
+
+/// Normalize and validate a Stellar account ID.
+///
+/// Accepts address strings with leading/trailing whitespace and lower-case
+/// letters, normalizing them to the canonical upper-case Stellar public key
+/// form before returning.
+pub fn normalize_stellar_account_id(account_id: &str) -> Result<alloc::string::String, Error> {
+    let trimmed = account_id.trim();
+    if trimmed.is_empty() {
+        return Err(Error::validation_error("account_id is empty"));
+    }
+    if trimmed.chars().any(|c| c.is_ascii_whitespace()) {
+        return Err(Error::validation_error("account_id must not contain whitespace"));
+    }
+    let normalized = trimmed.to_ascii_uppercase();
+    if normalized.len() != 56 {
+        return Err(Error::validation_error("account_id must be 56 characters"));
+    }
+    if !normalized.starts_with('G') {
+        return Err(Error::validation_error("account_id must start with G"));
+    }
+    if !normalized.chars().all(is_valid_stellar_account_char) {
+        return Err(Error::validation_error("account_id contains invalid characters"));
+    }
+    if !is_valid_stellar_strkey(&normalized) {
+        return Err(Error::validation_error("account_id checksum is invalid"));
+    }
+    Ok(alloc::string::String::from(normalized))
+}
+
+/// Validate a Stellar account ID string.
+pub fn validate_stellar_account_id(account_id: &str) -> Result<(), Error> {
+    normalize_stellar_account_id(account_id).map(|_| ())
 }
 
 fn is_valid_quote_status(status: &str) -> bool {
@@ -745,6 +842,47 @@ mod tests {
         // 56 chars but starts with 'A' not 'G'
         assert!(validate_stellar_asset(
             "USDC:ABBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5"
+        ).is_err());
+    }
+
+    #[test]
+    fn test_stellar_account_id_valid() {
+        assert!(normalize_stellar_account_id(
+            "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5"
+        ).is_ok());
+    }
+
+    #[test]
+    fn test_stellar_account_id_normalizes_lowercase_and_whitespace() {
+        let normalized = normalize_stellar_account_id(
+            "  gbbd47if6lwk7p7mdevscwr7dpuwv3ny3dtqevfl4nat4aqh3zllfla5  "
+        ).unwrap();
+        assert_eq!(normalized, "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5");
+    }
+
+    #[test]
+    fn test_stellar_account_id_wrong_length() {
+        assert!(validate_stellar_account_id("GBBD47IF6LWK7P7MDEVS").is_err());
+    }
+
+    #[test]
+    fn test_stellar_account_id_wrong_prefix() {
+        assert!(validate_stellar_account_id(
+            "ABBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5"
+        ).is_err());
+    }
+
+    #[test]
+    fn test_stellar_account_id_invalid_checksum() {
+        assert!(validate_stellar_account_id(
+            "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA6"
+        ).is_err());
+    }
+
+    #[test]
+    fn test_stellar_account_id_invalid_character() {
+        assert!(validate_stellar_account_id(
+            "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFL!5"
         ).is_err());
     }
 

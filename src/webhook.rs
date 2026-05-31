@@ -208,9 +208,10 @@ mod tests {
             retry_config: RetryConfig {
                 max_attempts: max_retries,
                 base_delay_ms: 1,
-                multiplier: 1,
+                backoff_multiplier: 1,
                 max_delay_ms: 10,
             },
+
             dead_letter_storage_key: "test-key".to_string(),
         }
     }

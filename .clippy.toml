@@ -1,0 +1,50 @@
+# AnchorKit Clippy linting configuration
+# Enforces code quality and best practices
+# Run: cargo clippy --all-targets --all-features -- -D warnings
+
+# Lint levels
+# -D (deny) = fail the build
+# -W (warn) = warn but don't fail
+# -A (allow) = suppress the lint
+
+# Cognitive complexity threshold (default: 25)
+cognitive-complexity-threshold = 30
+
+# Type complexity threshold (default: 250)
+type-complexity-threshold = 500
+
+# Too many arguments threshold (default: 7)
+too-many-arguments-threshold = 8
+
+# Enforce single-char lifetime names
+single-char-lifetime-names-threshold = 4
+
+# Enforce doc comments on public items
+doc-valid-idents = [
+    "AnchorKit",
+    "SEP",
+    "WASM",
+    "XDR",
+    "JWT",
+    "KYC",
+    "TTL",
+    "SWR",
+    "Soroban",
+    "Stellar",
+    "HTTPS",
+    "URL",
+    "API",
+    "Ed25519",
+    "SHA",
+    "TOML",
+    "JSON",
+    "CLI",
+    "HTTP",
+    "CBRN",
+]
+
+# Allowed unsafe blocks (use sparingly)
+allow-unsafe-blocks = false
+
+# Enforce missing docs on public items
+missing-docs-in-crate-items = false

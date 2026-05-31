@@ -1,10 +1,16 @@
 #![cfg(test)]
 
+mod sep10_test_util;
+
 mod kyc_compliance_tests {
     use soroban_sdk::testutils::{Address as _, Ledger, LedgerInfo};
     use soroban_sdk::{Address, Bytes, Env, String};
 
+    use ed25519_dalek::SigningKey;
+    use rand::rngs::OsRng;
+
     use crate::contract::{AnchorKitContract, AnchorKitContractClient, KycStatus};
+    use crate::sep10_test_util::register_attestor_with_sep10;
 
     fn make_env() -> Env {
         let env = Env::default();
@@ -38,10 +44,11 @@ mod kyc_compliance_tests {
     fn register_attestor(
         env: &Env,
         client: &AnchorKitContractClient,
-        admin: &Address,
+        _admin: &Address,
         attestor: &Address,
     ) {
-        client.register_attestor(attestor, admin);
+        let sk = SigningKey::generate(&mut OsRng);
+        register_attestor_with_sep10(env, client, attestor, attestor, &sk);
     }
 
     // -----------------------------------------------------------------------
@@ -84,11 +91,45 @@ mod kyc_compliance_tests {
         assert_eq!(status, KycStatus::Pending);
 
         // Approve KYC
-        client.approve_kyc(&subject);
+        client.approve_kyc(&admin, &subject);
 
         // Status should now be Approved
         let status = client.get_kyc_status(&subject);
         assert_eq!(status, KycStatus::Approved);
+    }
+
+    #[test]
+    fn test_kyc_status_expired_after_approval() {
+        let (env, admin, client) = setup_contract();
+        let attestor = Address::generate(&env);
+        let subject = Address::generate(&env);
+        register_attestor(&env, &client, &admin, &attestor);
+
+        let data_hash = Bytes::from_slice(&env, b"test_kyc_data_hash_1234567890ab");
+        client.submit_kyc(&subject, &data_hash, &attestor);
+        client.approve_kyc(&subject);
+        assert_eq!(client.get_kyc_status(&subject), KycStatus::Approved);
+
+        set_ledger(&env, 1000 + 30 * 24 * 60 * 60 + 1);
+        assert_eq!(client.get_kyc_status(&subject), KycStatus::Expired);
+    }
+
+    #[test]
+    fn test_kyc_can_resubmit_after_expiry() {
+        let (env, admin, client) = setup_contract();
+        let attestor = Address::generate(&env);
+        let subject = Address::generate(&env);
+        register_attestor(&env, &client, &admin, &attestor);
+
+        let data_hash = Bytes::from_slice(&env, b"test_kyc_data_hash_1234567890ab");
+        client.submit_kyc(&subject, &data_hash, &attestor);
+        client.approve_kyc(&subject);
+        set_ledger(&env, 1000 + 30 * 24 * 60 * 60 + 1);
+        assert_eq!(client.get_kyc_status(&subject), KycStatus::Expired);
+
+        let new_data_hash = Bytes::from_slice(&env, b"reopened_kyc_data_hash_1234567890ab");
+        client.submit_kyc(&subject, &new_data_hash, &attestor);
+        assert_eq!(client.get_kyc_status(&subject), KycStatus::Pending);
     }
 
     #[test]
@@ -108,7 +149,7 @@ mod kyc_compliance_tests {
 
         // Reject KYC with reason
         let reason_hash = Bytes::from_slice(&env, b"rejection_reason_hash_1234567890");
-        client.reject_kyc(&subject, &reason_hash);
+        client.reject_kyc(&admin, &subject, &reason_hash);
 
         // Status should now be Rejected
         let status = client.get_kyc_status(&subject);
@@ -125,7 +166,7 @@ mod kyc_compliance_tests {
         // Submit and approve KYC
         let data_hash = Bytes::from_slice(&env, b"test_kyc_data_hash_1234567890ab");
         client.submit_kyc(&subject, &data_hash, &attestor);
-        client.approve_kyc(&subject);
+        client.approve_kyc(&admin, &subject);
 
         // Verify Approved status
         let status = client.get_kyc_status(&subject);
@@ -150,7 +191,7 @@ mod kyc_compliance_tests {
         let data_hash = Bytes::from_slice(&env, b"test_kyc_data_hash_1234567890ab");
         client.submit_kyc(&subject, &data_hash, &attestor);
         let reason_hash = Bytes::from_slice(&env, b"rejection_reason_hash_1234567890");
-        client.reject_kyc(&subject, &reason_hash);
+        client.reject_kyc(&admin, &subject, &reason_hash);
 
         // Verify Rejected status
         let status = client.get_kyc_status(&subject);
@@ -174,11 +215,11 @@ mod kyc_compliance_tests {
         // Submit and approve KYC
         let data_hash = Bytes::from_slice(&env, b"test_kyc_data_hash_1234567890ab");
         client.submit_kyc(&subject, &data_hash, &attestor);
-        client.approve_kyc(&subject);
+        client.approve_kyc(&admin, &subject);
 
         // Try to approve again - should fail (illegal transition)
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            client.approve_kyc(&subject);
+            client.approve_kyc(&admin, &subject);
         }));
         assert!(result.is_err());
     }
@@ -193,12 +234,12 @@ mod kyc_compliance_tests {
         // Submit and approve KYC
         let data_hash = Bytes::from_slice(&env, b"test_kyc_data_hash_1234567890ab");
         client.submit_kyc(&subject, &data_hash, &attestor);
-        client.approve_kyc(&subject);
+        client.approve_kyc(&admin, &subject);
 
         // Try to reject approved KYC - should fail (illegal transition)
         let reason_hash = Bytes::from_slice(&env, b"rejection_reason_hash_1234567890");
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            client.reject_kyc(&subject, &reason_hash);
+            client.reject_kyc(&admin, &subject, &reason_hash);
         }));
         assert!(result.is_err());
     }
@@ -240,7 +281,7 @@ mod kyc_compliance_tests {
 
         let data_hash = Bytes::from_slice(&env, b"test_kyc_data_hash_1234567890ab");
         client.submit_kyc(&subject, &data_hash, &attestor);
-        client.approve_kyc(&subject);
+        client.approve_kyc(&admin, &subject);
 
         let status = client.get_kyc_status(&subject);
         assert_eq!(status, KycStatus::Approved);
@@ -256,7 +297,7 @@ mod kyc_compliance_tests {
         let data_hash = Bytes::from_slice(&env, b"test_kyc_data_hash_1234567890ab");
         client.submit_kyc(&subject, &data_hash, &attestor);
         let reason_hash = Bytes::from_slice(&env, b"rejection_reason_hash_1234567890");
-        client.reject_kyc(&subject, &reason_hash);
+        client.reject_kyc(&admin, &subject, &reason_hash);
 
         let status = client.get_kyc_status(&subject);
         assert_eq!(status, KycStatus::Rejected);
@@ -296,7 +337,7 @@ mod kyc_compliance_tests {
         // Try to approve with non-admin address - should fail
         let non_admin = Address::generate(&env);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            client.approve_kyc(&subject);
+            client.approve_kyc(&admin, &subject);
         }));
         // Note: In mock_all_auths mode, this may not fail as expected.
         // In production, this would require proper auth checks.
@@ -315,7 +356,7 @@ mod kyc_compliance_tests {
         // Try to reject with non-admin address - should fail
         let reason_hash = Bytes::from_slice(&env, b"rejection_reason_hash_1234567890");
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            client.reject_kyc(&subject, &reason_hash);
+            client.reject_kyc(&admin, &subject, &reason_hash);
         }));
         // Note: In mock_all_auths mode, this may not fail as expected.
         // In production, this would require proper auth checks.
@@ -390,7 +431,7 @@ mod kyc_compliance_tests {
         let data_hash = Bytes::from_slice(&env, b"test_kyc_data_hash_1234567890ab");
         client.submit_kyc(&subject, &data_hash, &attestor);
         let reason_hash = Bytes::from_slice(&env, b"rejection_reason_hash_1234567890");
-        client.reject_kyc(&subject, &reason_hash);
+        client.reject_kyc(&admin, &subject, &reason_hash);
 
         // Try to submit attestation with rejected KYC - should fail
         let timestamp = env.ledger().timestamp();
@@ -420,7 +461,7 @@ mod kyc_compliance_tests {
         // Submit and approve KYC
         let data_hash = Bytes::from_slice(&env, b"test_kyc_data_hash_1234567890ab");
         client.submit_kyc(&subject, &data_hash, &attestor);
-        client.approve_kyc(&subject);
+        client.approve_kyc(&admin, &subject);
 
         // Submit attestation with approved KYC - should succeed
         let timestamp = env.ledger().timestamp();
@@ -502,7 +543,7 @@ mod kyc_compliance_tests {
         // Submit and approve KYC for subject2
         let data_hash2 = Bytes::from_slice(&env, b"test_kyc_data_hash_2234567890ab");
         client.submit_kyc(&subject2, &data_hash2, &attestor);
-        client.approve_kyc(&subject2);
+        client.approve_kyc(&admin, &subject2);
 
         // Verify statuses are independent
         let status1 = client.get_kyc_status(&subject1);
@@ -522,7 +563,7 @@ mod kyc_compliance_tests {
         let data_hash = Bytes::from_slice(&env, b"test_kyc_data_hash_1234567890ab");
         client.submit_kyc(&subject, &data_hash, &attestor);
         let reason_hash = Bytes::from_slice(&env, b"rejection_reason_hash_1234567890");
-        client.reject_kyc(&subject, &reason_hash);
+        client.reject_kyc(&admin, &subject, &reason_hash);
 
         // Verify status is rejected
         let status = client.get_kyc_status(&subject);

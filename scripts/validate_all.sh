@@ -27,7 +27,7 @@ toml_to_json() {
     yq -o=json '.' "$toml_file" > "$tmp"
   elif command -v dasel &>/dev/null; then
     dasel -f "$toml_file" -r toml -w json '.' > "$tmp"
-  elif command -v python3 &>/dev/null; then
+elif command -v python3 &>/dev/null; then
     python3 - "$toml_file" "$tmp" <<'PYEOF'
 import sys, json, pathlib
 p = pathlib.Path(sys.argv[1])
@@ -38,12 +38,11 @@ except ImportError:
         import tomli as tomllib
     except ImportError:
         import toml as tomllib
-        json.dump(tomllib.loads(p.read_text()), open(sys.argv[2], "w"), indent=2)
-        sys.exit(0)
-json.dump(tomllib.loads(p.read_bytes()), open(sys.argv[2], "w"), indent=2)
+data = tomllib.loads(p.read_text())
+json.dump(data, open(sys.argv[2], "w"), indent=2)
 PYEOF
   else
-    die "No TOML converter found. Install yq, dasel, or python3+toml."
+     die "No TOML converter found. Install yq, dasel, or python3+toml."
   fi
 
   echo "$tmp"

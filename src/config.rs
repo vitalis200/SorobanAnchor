@@ -16,7 +16,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 #[cfg(feature = "std")]
-use std::{fs, path::Path};
+use std::{fs, io::{self, ErrorKind, Read}, path::Path};
 
 #[derive(Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -228,6 +228,39 @@ pub struct AlertConfig {
     pub recipients: Vec<String>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
+}
+
+fn secure_read_config_file(path: &Path) -> Result<String, std::io::Error> {
+    // Ensure the file exists
+    if !path.exists() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("file does not exist: {}", path.display()),
+        ));
+    }
+    // Reject symlinks to avoid symlink attacks
+    if let Ok(metadata) = path.metadata() {
+        if metadata.file_type().is_symlink() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("symlink file is not allowed: {}", path.display()),
+            ));
+        }
+    }
+    // Ensure it's a regular file
+    if let Ok(metadata) = path.metadata() {
+        if !metadata.file_type().is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("not a regular file: {}", path.display()),
+            ));
+        }
+    }
+    // Open for reading (checks readability)
+    let mut file = std::fs::File::open(path)?;
+    let mut contents = String::new();
+    file.read_to_string(&mut contents)?;
+    Ok(contents)
 }
 
 pub fn parse_runtime_config_str(input: &str, format: ConfigFormat) -> Result<RuntimeConfig, String> {

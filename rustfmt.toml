@@ -1,0 +1,63 @@
+# AnchorKit Rust formatting configuration
+# Enforces consistent code style across the project
+# Run: cargo fmt
+
+# Edition
+edition = "2021"
+
+# Line length
+max_width = 100
+
+# Indentation
+hard_tabs = false
+tab_spaces = 4
+
+# Imports
+reorder_imports = true
+reorder_modules = true
+group_imports = "StdExternalCrate"
+
+# Formatting
+format_strings = true
+normalize_comments = true
+wrap_comments = true
+comment_width = 80
+
+# Spaces
+space_after_colon = true
+space_before_colon = false
+
+# Trailing commas
+trailing_comma = "Vertical"
+
+# Function formatting
+fn_single_line = false
+fn_args_layout = "Tall"
+
+# Match formatting
+match_block_trailing_comma = true
+
+# Struct formatting
+struct_literal_style = "Visual"
+struct_literal_width = 18
+
+# Enum formatting
+enum_discrim_align_threshold = 20
+
+# Chains
+chain_width = 60
+chain_indent = "Block"
+
+# Closures
+closure_indent = "Block"
+
+# Blank lines
+blank_lines_lower_bound = 0
+blank_lines_upper_bound = 1
+
+# Misc
+force_explicit_abi = true
+reorder_impl_items = true
+use_field_init_shorthand = true
+use_try_shorthand = true
+use_small_heuristics = "Default"

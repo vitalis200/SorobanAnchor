@@ -1,5 +1,75 @@
+#![cfg(feature = "std")]
+//! CLI binary for AnchorKit.
+//!
+//! This binary is only available when building with the `std` feature (the default).
+//! For WASM builds, disable default features:
+//!   cargo build --target wasm32-unknown-unknown --no-default-features --features wasm
+
 use clap::{Parser, Subcommand};
 use serde::Serialize;
+use std::fs::{self, File};
+use std::io::{self, ErrorKind, Read};
+
+// ── SecretKey wrapper ──────────────────────────────────────────────────────────
+
+/// Opaque wrapper around a Stellar secret key string.
+/// Does not implement Debug or Display to prevent accidental logging.
+struct SecretKey(String);
+
+impl SecretKey {
+    fn new(s: impl Into<String>) -> Self {
+        SecretKey(s.into())
+    }
+}
+
+impl std::ops::Deref for SecretKey {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<std::ffi::OsStr> for SecretKey {
+    fn as_ref(&self) -> &std::ffi::OsStr {
+        self.0.as_ref()
+    }
+}
+
+// ── Secret key wrapper (zeroizing) ───────────────────────────────────────────
+//
+// Prevents accidental secret leakage through Debug/Display, and zeroizes the
+// key material when the value is dropped (post-use or on error paths).
+
+struct SecretKey(String);
+
+impl SecretKey {
+    fn new(raw: impl Into<String>) -> Self { Self(raw.into()) }
+    fn expose(&self) -> &str { &self.0 }
+}
+
+impl std::fmt::Debug for SecretKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SecretKey([REDACTED])")
+    }
+}
+
+impl std::fmt::Display for SecretKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("[REDACTED]")
+    }
+}
+
+impl std::ops::Deref for SecretKey {
+    type Target = str;
+    fn deref(&self) -> &str { &self.0 }
+}
+
+impl Drop for SecretKey {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.0.zeroize();
+    }
+}
 
 // ── Network profile management ────────────────────────────────────────────────
 
@@ -23,6 +93,40 @@ fn dirs_home() -> std::path::PathBuf {
     std::env::var("HOME")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| std::path::PathBuf::from("."))
+}
+
+fn secure_read_file(path: &str) -> Result<String, std::io::Error> {
+    let path_buf = std::path::Path::new(path);
+    // Ensure the file exists
+    if !path_buf.exists() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("file does not exist: {path}"),
+        ));
+    }
+    // Reject symlinks to avoid symlink attacks
+    if let Ok(metadata) = path_buf.metadata() {
+        if metadata.file_type().is_symlink() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("symlink file is not allowed: {path}"),
+            ));
+        }
+    }
+    // Ensure it's a regular file
+    if let Ok(metadata) = path_buf.metadata() {
+        if !metadata.file_type().is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("not a regular file: {path}"),
+            ));
+        }
+    }
+    // Open for reading (checks readability)
+    let mut file = std::fs::File::open(path_buf)?;
+    let mut contents = String::new();
+    file.read_to_string(&mut contents)?;
+    Ok(contents)
 }
 
 fn load_network_profiles() -> Vec<NetworkProfile> {
@@ -66,11 +170,20 @@ fn default_network() -> String {
         .unwrap_or_else(|| "testnet".to_string())
 }
 
-
+/// Return the contract ID to use, checking the per-command arg first, then
+/// the global flag / ANCHOR_CONTRACT_ID env var.  Exits with a clear error
+/// if neither is set.
+fn require_contract_id(global: Option<String>, local: Option<String>, command: &str) -> String {
+    local.or(global).unwrap_or_else(|| {
+        eprintln!("error: --contract-id (or ANCHOR_CONTRACT_ID) is required for `{command}`");
+        eprintln!("hint:  pass --contract-id <ID>  or  export ANCHOR_CONTRACT_ID=<ID>");
+        std::process::exit(1);
+    })
+}
 
 /// Resolve the signing source from flags or environment.
 /// Priority: --secret-key > ANCHOR_ADMIN_SECRET > --keypair-file > --credential-name
-fn resolve_source(secret_key: Option<&str>, keypair_file: Option<&str>, credential_name: Option<&str>) -> String {
+fn resolve_source(secret_key: Option<&str>, keypair_file: Option<&str>, credential_name: Option<&str>) -> SecretKey {
     if let Some(sk) = secret_key {
         return SecretKey::new(sk);
     }
@@ -80,12 +193,13 @@ fn resolve_source(secret_key: Option<&str>, keypair_file: Option<&str>, credenti
         }
     }
     if let Some(path) = keypair_file {
-        // Only report the file path in errors, never the file contents.
-        let raw = std::fs::read_to_string(path)
-            .unwrap_or_else(|e| {
+        let raw = match secure_read_file(path) {
+            Ok(content) => content,
+            Err(e) => {
                 eprintln!("error: cannot read keypair file '{path}': {e}");
                 std::process::exit(1);
-            });
+            }
+        };
         // Support JSON {"secret_key":"S..."} or plain text.
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
             if let Some(sk) = v.get("secret_key").and_then(|s| s.as_str()) {
@@ -95,12 +209,31 @@ fn resolve_source(secret_key: Option<&str>, keypair_file: Option<&str>, credenti
         return SecretKey::new(raw.trim());
     }
     if let Some(name) = credential_name {
+        if no_interactive {
+            eprintln!("error: --credential-name requires an interactive password prompt; \
+                       use --secret-key, --ephemeral-token, or ANCHOR_ADMIN_SECRET in non-interactive mode");
+            std::process::exit(1);
+        }
         let password = rpassword::prompt_password("Keystore password: ")
             .unwrap_or_else(|e| { eprintln!("error: failed to read password: {e}"); std::process::exit(1); });
         return keystore_get_decrypted(name, &password);
     }
-    eprintln!("error: signing key required — provide --secret-key, set ANCHOR_ADMIN_SECRET, use --keypair-file, or use --credential-name");
+    eprintln!("error: signing key required — provide one of:");
+    eprintln!("  --secret-key <KEY>");
+    eprintln!("  export ANCHOR_ADMIN_SECRET=<KEY>");
+    eprintln!("  --keypair-file <PATH>");
+    eprintln!("  --credential-name <NAME>  (use: anchorkit credentials add --name <NAME>)");
     std::process::exit(1);
+}
+
+fn normalize_stellar_public_address(field: &str, address: &str) -> String {
+    match normalize_stellar_account_id(address) {
+        Ok(normalized) => normalized,
+        Err(err) => {
+            eprintln!("error: invalid {field}: {0}", err.message);
+            std::process::exit(1);
+        }
+    }
 }
 
 // ── RPC helpers ───────────────────────────────────────────────────────────────
@@ -134,6 +267,7 @@ fn stellar_invoke(
 ) -> String {
     let url = rpc_url_for(network);
     let phrase = passphrase_for(network);
+    let source: &str = source; // coerce &SecretKey → &str for uniform array element type
     let output = std::process::Command::new("stellar")
         .args(["contract", "invoke",
                "--id", contract_id,
@@ -166,6 +300,17 @@ struct Cli {
     /// Stellar network: testnet | mainnet | futurenet | <custom> (or set STELLAR_NETWORK)
     #[arg(long, global = true, env = "STELLAR_NETWORK")]
     network: Option<String>,
+
+    /// Disable all interactive prompts; batch scripts use this to avoid hanging on input.
+    /// Also enabled by setting ANCHORKIT_NO_INTERACTIVE=1.
+    #[arg(long, global = true, env = "ANCHORKIT_NO_INTERACTIVE")]
+    no_interactive: bool,
+
+    /// One-time ephemeral signing token (highest priority over other key sources; zeroized after use).
+    /// Intended for single-operation authorization in automated flows.
+    /// Also settable via ANCHORKIT_EPHEMERAL_TOKEN.
+    #[arg(long, global = true, env = "ANCHORKIT_EPHEMERAL_TOKEN")]
+    ephemeral_token: Option<String>,
 
     #[command(subcommand)]
     command: Commands,
@@ -203,7 +348,7 @@ enum Commands {
     Register {
         #[arg(long)] address: String,
         #[arg(long, value_delimiter = ',')] services: Vec<String>,
-        #[arg(long)] contract_id: String,
+        #[arg(long)] contract_id: Option<String>,
         #[arg(long, default_value = "testnet")] network: String,
         #[arg(long)] secret_key: Option<String>,
         #[arg(long)] keypair_file: Option<String>,
@@ -216,7 +361,7 @@ enum Commands {
     Attest {
         #[arg(long)] subject: String,
         #[arg(long)] payload_hash: String,
-        #[arg(long)] contract_id: String,
+        #[arg(long)] contract_id: Option<String>,
         #[arg(long, default_value = "testnet")] network: String,
         #[arg(long)] secret_key: Option<String>,
         #[arg(long)] keypair_file: Option<String>,
@@ -233,7 +378,7 @@ enum Commands {
         #[arg(long)] to: String,
         /// Amount in base asset units
         #[arg(long)] amount: u64,
-        #[arg(long)] contract_id: String,
+        #[arg(long)] contract_id: Option<String>,
         #[arg(long, default_value = "testnet")] network: String,
         #[arg(long)] secret_key: Option<String>,
         #[arg(long)] keypair_file: Option<String>,
@@ -250,7 +395,7 @@ enum Commands {
     /// Revoke an attestor
     Revoke {
         #[arg(long)] address: String,
-        #[arg(long)] contract_id: String,
+        #[arg(long)] contract_id: Option<String>,
         #[arg(long, default_value = "testnet")] network: String,
         #[arg(long)] secret_key: Option<String>,
         #[arg(long)] keypair_file: Option<String>,
@@ -267,6 +412,24 @@ enum Commands {
         /// Attempt to automatically fix issues
         #[arg(long)]
         fix: bool,
+    },
+    /// Query contract health, metadata freshness, and rate limiter status
+    Health {
+        /// Contract ID to query (or set ANCHOR_CONTRACT_ID)
+        #[arg(long)]
+        contract_id: String,
+        #[arg(long, default_value = "testnet")]
+        network: String,
+        #[arg(long)]
+        secret_key: Option<String>,
+        #[arg(long)]
+        keypair_file: Option<String>,
+        /// Anchor address to check metadata freshness for (optional)
+        #[arg(long)]
+        anchor: Option<String>,
+        /// Attestor address to check rate limiter health for (optional)
+        #[arg(long)]
+        attestor: Option<String>,
     },
     /// Manage custom network profiles
     Network {
@@ -415,7 +578,7 @@ fn pre_deploy_validate(network: &str) -> bool {
 ///   2. Upload the WASM to the network and obtain its hash.
 ///   3. Call `upgrade(new_wasm_hash)` on the contract.
 ///   4. Call `migrate()` to apply any state-schema changes.
-fn upgrade_contract(contract_id: &str, network: &str, source: &str) {
+fn upgrade_contract(contract_id: &str, network: &str, source: &SecretKey) {
     println!("\n🔍 Pre-upgrade validation ({network})...");
     if !pre_deploy_validate(network) {
         eprintln!("\n❌ Pre-upgrade validation failed. Aborting.");
@@ -444,11 +607,12 @@ fn upgrade_contract(contract_id: &str, network: &str, source: &str) {
 
     // Upload WASM and capture the resulting hash.
     println!("Uploading WASM to {network}...");
+    let source_str: &str = source; // coerce &SecretKey → &str for uniform array element type
     let upload_output = std::process::Command::new("stellar")
         .args([
             "contract", "upload",
             "--wasm", wasm,
-            "--source", source,
+            "--source", source_str,
             "--rpc-url", &net_url,
             "--network-passphrase", &net_phrase,
         ])
@@ -600,6 +764,8 @@ fn register(
     address: &str, services: &[String], contract_id: &str,
     network: &str, source: &SecretKey, sep10_token: &str, sep10_issuer: &str,
 ) {
+    let address = normalize_stellar_public_address("attestor address", address);
+    let sep10_issuer = normalize_stellar_public_address("SEP-10 issuer address", sep10_issuer);
     let service_ids = parse_services(services)
         .iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",");
 
@@ -607,14 +773,14 @@ fn register(
     // subprocess argument to the Stellar CLI and is never echoed to stdout.
     stellar_invoke(contract_id, source, network, &[
         "register_attestor",
-        "--attestor", address,
+        "--attestor", &address,
         "--sep10_token", sep10_token,
-        "--sep10_issuer", sep10_issuer,
+        "--sep10_issuer", &sep10_issuer,
         "--public_key", "0000000000000000000000000000000000000000000000000000000000000000",
     ]);
     stellar_invoke(contract_id, source, network, &[
         "configure_services",
-        "--anchor", address,
+        "--anchor", &address,
         "--services", &service_ids,
     ]);
     println!("Attestor {address} registered and services configured.");
@@ -624,6 +790,8 @@ fn attest(
     subject: &str, payload_hash: &str, contract_id: &str,
     network: &str, source: &SecretKey, issuer: &str, session_id: Option<u64>,
 ) {
+    let subject = normalize_stellar_public_address("subject address", subject);
+    let issuer = normalize_stellar_public_address("issuer address", issuer);
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs().to_string();
 
@@ -636,7 +804,7 @@ fn attest(
         stellar_invoke(contract_id, source, network, &[
             "submit_attestation_with_session",
             "--session_id", &session_str,
-            "--issuer", issuer, "--subject", subject,
+            "--issuer", &issuer, "--subject", &subject,
             "--timestamp", &timestamp,
             "--payload_hash", payload_hash,
             "--signature", payload_hash,  // placeholder — replace with real sig
@@ -644,7 +812,7 @@ fn attest(
     } else {
         stellar_invoke(contract_id, source, network, &[
             "submit_attestation",
-            "--issuer", issuer, "--subject", subject,
+            "--issuer", &issuer, "--subject", &subject,
             "--timestamp", &timestamp,
             "--payload_hash", payload_hash,
             "--signature", payload_hash,  // placeholder — replace with real sig
@@ -715,7 +883,7 @@ fn status(tx_id: &str, anchor_url: &str) {
 fn revoke(address: &str, contract_id: &str, network: &str, source: &SecretKey) {
     stellar_invoke(contract_id, source, network, &[
         "revoke_attestor",
-        "--attestor", address,
+        "--attestor", &address,
     ]);
     println!("{{\"revoked\": true, \"address\": \"{address}\"}}");
 }
@@ -834,10 +1002,11 @@ fn check_contract_deployment(contract_id: &str, network: &str) -> CheckResult {
         .map(SecretKey::new)
         .unwrap_or_else(|| SecretKey::new("default"));
 
+    let source_str: &str = &*source; // coerce SecretKey → &str for uniform array element type
     let output = std::process::Command::new("stellar")
         .args(["contract", "invoke",
                "--id", contract_id,
-               "--source", &source,
+               "--source", source_str,
                "--rpc-url", &rpc_url_for(network),
                "--network-passphrase", &passphrase_for(network),
                "--",
@@ -941,6 +1110,62 @@ fn doctor(network: &str, fix: bool) {
         }
         std::process::exit(1);
     }
+}
+
+// ── Health check command (#268) ───────────────────────────────────────────────
+
+fn health_check(contract_id: &str, network: &str, source: &SecretKey, anchor: Option<&str>, attestor: Option<&str>) {
+    println!("\n🏥 AnchorKit Health Check\n");
+
+    // 1. Overall service health
+    let status_raw = stellar_invoke(contract_id, source, network, &["get_health_status"]);
+    let status_label = match status_raw.trim().trim_matches('"') {
+        "0" | "Healthy"     => "\x1b[32m✓ Healthy\x1b[0m",
+        "1" | "Degraded"    => "\x1b[33m⚠ Degraded\x1b[0m",
+        _                   => "\x1b[31m✗ Unavailable\x1b[0m",
+    };
+    println!("  Service Status : {status_label}");
+
+    // 2. Metadata freshness (optional — only when --anchor is supplied)
+    if let Some(anchor_addr) = anchor {
+        let freshness_raw = stellar_invoke(contract_id, source, network, &[
+            "get_metadata_freshness",
+            "--anchor", anchor_addr,
+        ]);
+        // Parse the returned struct fields from JSON-like output
+        let state_label = if freshness_raw.contains("\"Fresh\"") || freshness_raw.contains("\"state\":0") {
+            "\x1b[32mFresh\x1b[0m"
+        } else if freshness_raw.contains("\"Stale\"") || freshness_raw.contains("\"state\":2") {
+            "\x1b[33mStale — refresh recommended\x1b[0m"
+        } else if freshness_raw.contains("\"Expired\"") || freshness_raw.contains("\"state\":3") {
+            "\x1b[31mExpired — must refresh\x1b[0m"
+        } else {
+            "\x1b[31mMissing — no cache entry\x1b[0m"
+        };
+        println!("  Metadata Cache : {state_label}");
+        println!("  Anchor         : {anchor_addr}");
+    }
+
+    // 3. Rate limiter health (optional — only when --attestor is supplied)
+    if let Some(attestor_addr) = attestor {
+        let rl_raw = stellar_invoke(contract_id, source, network, &[
+            "get_rate_limiter_health",
+            "--attestor", attestor_addr,
+        ]);
+        let throttled = rl_raw.contains("\"is_throttled\":true") || rl_raw.contains("is_throttled: true");
+        let rl_label = if throttled {
+            "\x1b[31m✗ Throttled\x1b[0m"
+        } else {
+            "\x1b[32m✓ OK\x1b[0m"
+        };
+        println!("  Rate Limiter   : {rl_label}");
+        println!("  Attestor       : {attestor_addr}");
+        if throttled {
+            eprintln!("\n  ⚠  Attestor has reached the submission limit for the current window.");
+        }
+    }
+
+    println!();
 }
 
 // ── Network command ───────────────────────────────────────────────────────────
@@ -1112,15 +1337,21 @@ fn keystore_decrypt(password: &str, name: &str, stored: &str) -> Result<String, 
     String::from_utf8(plaintext).map_err(|e| format!("utf8: {e}"))
 }
 
-fn keystore_get_decrypted(name: &str, password: &str) -> String {
+fn keystore_get_decrypted(name: &str, password: &str) -> SecretKey {
     let store = keystore_load();
     let stored = store.get(name)
         .unwrap_or_else(|| { eprintln!("error: credential '{}' not found", name); std::process::exit(1); });
-    keystore_decrypt(password, name, stored)
-        .unwrap_or_else(|e| { eprintln!("error: failed to decrypt credential: {e}"); std::process::exit(1); })
+    let plaintext = keystore_decrypt(password, name, stored)
+        .unwrap_or_else(|e| { eprintln!("error: failed to decrypt credential: {e}"); std::process::exit(1); });
+    SecretKey::new(plaintext)
 }
 
-fn credentials_add(name: &str, value: Option<&str>) {
+fn credentials_add(name: &str, value: Option<&str>, no_interactive: bool) {
+    if no_interactive {
+        eprintln!("error: 'credentials add' requires interactive password prompts; \
+                   not supported with --no-interactive / ANCHORKIT_NO_INTERACTIVE");
+        std::process::exit(1);
+    }
     let secret = match value {
         Some(v) => v.to_string(),
         None => rpassword::prompt_password("Secret key value: ")
@@ -1141,11 +1372,16 @@ fn credentials_add(name: &str, value: Option<&str>) {
     println!("Credential '{}' stored.", name);
 }
 
-fn credentials_get(name: &str) {
+fn credentials_get(name: &str, no_interactive: bool) {
+    if no_interactive {
+        eprintln!("error: 'credentials get' requires an interactive password prompt; \
+                   not supported with --no-interactive / ANCHORKIT_NO_INTERACTIVE");
+        std::process::exit(1);
+    }
     let password = rpassword::prompt_password("Keystore password: ")
         .unwrap_or_else(|e| { eprintln!("error: {e}"); std::process::exit(1); });
     let secret = keystore_get_decrypted(name, &password);
-    println!("{secret}");
+    println!("{}", secret.expose());
 }
 
 fn credentials_list() {
@@ -1173,15 +1409,19 @@ fn credentials_remove(name: &str) {
 
 fn main() {
     let cli = Cli::parse();
-    let network = cli.network.unwrap_or_else(default_network);
+    let global_contract_id = cli.contract_id.clone();
+    let network = cli.network.unwrap_or_else(|| {
+        let n = default_network();
+        if std::env::var("STELLAR_NETWORK").is_err() && !load_network_profiles().iter().any(|p| p.is_default) {
+            eprintln!("note: STELLAR_NETWORK not set — using '{n}' (set STELLAR_NETWORK or: anchorkit network set-default --name <NAME>)");
+        }
+        n
+    });
     match cli.command {
         Commands::Deploy { network: cmd_net, source, admin, dry_run, list, upgrade, secret_key, keypair_file } => {
             let net = cmd_net;
             if upgrade {
-                let contract_id = cli.contract_id.unwrap_or_else(|| {
-                    eprintln!("error: --contract-id (or ANCHOR_CONTRACT_ID) is required for --upgrade");
-                    std::process::exit(1);
-                });
+                let contract_id = require_contract_id(global_contract_id, None, "deploy --upgrade");
                 let signing_source = resolve_source(secret_key.as_deref(), keypair_file.as_deref(), None);
                 upgrade_contract(&contract_id, &net, &signing_source);
             } else {
@@ -1189,27 +1429,35 @@ fn main() {
             }
         }
         Commands::Register { address, services, contract_id, network: cmd_net, secret_key, keypair_file, credential_name, sep10_token, sep10_issuer } => {
+            let cid = require_contract_id(global_contract_id, contract_id, "register");
             let net = cmd_net;
             let source = resolve_source(secret_key.as_deref(), keypair_file.as_deref(), credential_name.as_deref());
-            register(&address, &services, &contract_id, &net, &source, &sep10_token, &sep10_issuer);
+            register(&address, &services, &cid, &net, &source, &sep10_token, &sep10_issuer);
         }
         Commands::Attest { subject, payload_hash, contract_id, network: cmd_net, secret_key, keypair_file, credential_name, issuer, session_id } => {
+            let cid = require_contract_id(global_contract_id, contract_id, "attest");
             let source = resolve_source(secret_key.as_deref(), keypair_file.as_deref(), credential_name.as_deref());
-            attest(&subject, &payload_hash, &contract_id, &cmd_net, &source, &issuer, session_id);
+            attest(&subject, &payload_hash, &cid, &cmd_net, &source, &issuer, session_id);
         }
         Commands::Quote { from, to, amount, contract_id, network: cmd_net, secret_key, keypair_file, credential_name } => {
+            let cid = require_contract_id(global_contract_id, contract_id, "quote");
             let source = resolve_source(secret_key.as_deref(), keypair_file.as_deref(), credential_name.as_deref());
-            quote(&from, &to, amount, &contract_id, &cmd_net, &source);
+            quote(&from, &to, amount, &cid, &cmd_net, &source);
         }
         Commands::Status { tx_id, anchor_url } => {
             status(&tx_id, &anchor_url);
         }
         Commands::Revoke { address, contract_id, network: cmd_net, secret_key, keypair_file, credential_name } => {
+            let cid = require_contract_id(global_contract_id, contract_id, "revoke");
             let source = resolve_source(secret_key.as_deref(), keypair_file.as_deref(), credential_name.as_deref());
-            revoke(&address, &contract_id, &cmd_net, &source);
+            revoke(&address, &cid, &cmd_net, &source);
         }
         Commands::Doctor { fix } => {
             doctor(&network, fix);
+        }
+        Commands::Health { contract_id, network: cmd_net, secret_key, keypair_file, anchor, attestor } => {
+            let source = resolve_source(secret_key.as_deref(), keypair_file.as_deref(), None);
+            health_check(&contract_id, &cmd_net, &source, anchor.as_deref(), attestor.as_deref());
         }
         Commands::Network { action } => {
             network_cmd(action);
@@ -1217,10 +1465,10 @@ fn main() {
         Commands::Credentials { action } => {
             match action {
                 CredentialsAction::Add { name, value } => {
-                    credentials_add(&name, value.as_deref());
+                    credentials_add(&name, value.as_deref(), no_interactive);
                 }
                 CredentialsAction::Get { name } => {
-                    credentials_get(&name);
+                    credentials_get(&name, no_interactive);
                 }
                 CredentialsAction::List => {
                     credentials_list();

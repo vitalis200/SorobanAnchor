@@ -1,5 +1,7 @@
 #![cfg(test)]
 
+mod sep10_test_util;
+
 mod sep10_contract_tests {
     use ed25519_dalek::{Signer, SigningKey};
     use rand::rngs::OsRng;

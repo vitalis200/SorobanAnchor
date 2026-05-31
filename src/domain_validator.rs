@@ -471,8 +471,11 @@ mod tests {
         assert!(validate_anchor_domain(&max_domain).is_ok());
     }
 
+    // NOTE: duplicate test name existed in this module in two different
+    // blocks. Keeping one authoritative boundary test and renaming the other
+    // to avoid a compile-time duplicate definition error.
     #[test]
-    fn test_length_boundaries() {
+    fn test_length_boundaries_case_1() {
         // "https://" (8) + label + ".com" (4) = 12 + label_len
         // Max total = 2048, so max label_len = 2036.
         let max_valid_domain = format!("https://{}.com", "a".repeat(2036));
@@ -486,6 +489,7 @@ mod tests {
         assert!(validate_anchor_domain("https://a.b").is_ok());
         assert!(validate_anchor_domain("https://ab.cd").is_ok());
     }
+
 
     // ------------------------------------------------------------------
     // Control characters and whitespace

@@ -3,3 +3,8 @@ Cargo.lock
 .DS_Store
 .env
 **/*.rs.bk
+
+# Release artifacts
+/dist
+*.tar.gz
+*.sha256

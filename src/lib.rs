@@ -92,67 +92,105 @@
 //!
 //! ## Feature flags
 //!
-//! | Flag | Default | Description |
-//! |------|---------|-------------|
-//! | `std` | ✓ | Enable standard-library support |
-//! | `wasm` | — | Target Soroban WASM environment |
-//! | `mock-only` | — | Compile only mock/test helpers |
-//! | `stress-tests` | — | Enable load-simulation test suite |
+//! | Flag | Default | Build command | What it gates |
+//! |------|---------|---------------|---------------|
+//! | `std` | ✓ | `cargo build` | Filesystem config loader ([`load_runtime_config_file`]), `config` module |
+//! | `wasm` | — | `cargo build --no-default-features --features wasm --target wasm32-unknown-unknown` | Excludes all HTTP/host modules; only on-chain contract code is compiled |
+//! | `mock-only` | — | `cargo test --features mock-only` | Enables the [`mock`] module with pre-built response fixtures for testing without a live anchor |
+//! | `stress-tests` | — | `cargo test --features stress-tests` | Enables the load-simulation integration test suite (excluded from normal CI) |
+//!
+//! ### Combining features
+//!
+//! ```text
+//! # Native development (default)
+//! cargo build
+//!
+//! # Soroban on-chain deployment (excludes all host-only modules)
+//! cargo build --release --target wasm32-unknown-unknown --no-default-features --features wasm
+//!
+//! # Testing with mocks (no live anchor required)
+//! cargo test --features mock-only
+//!
+//! # Full test suite including stress tests
+//! cargo test --features std,mock-only,stress-tests
+//! ```
 
 #![no_std]
 extern crate alloc;
 
+// ── Core modules (all build variants) ────────────────────────────────────────
 mod deterministic_hash;
 mod domain_validator;
 pub mod errors;
 pub mod sep10_jwt;
 pub mod rate_limiter;
-mod response_validator;
-#[cfg(feature = "std")]
-pub mod config;
 pub mod retry;
 pub mod transaction_state_tracker;
-pub mod webhook;
-pub mod sep6;
-pub mod sep24;
-pub mod sep38;
-pub use sep38::{
-    fetch_prices, request_firm_quote, is_quote_expired,
-    validate_firm_quote_with_constraints,
-    FirmQuote, Price, RawFirmQuote, RawPrice, QuoteConstraints,
-    CachedQuoteEntry, QuoteCache,
-    QuoteComparator, ScoredQuote, select_best_quote,
-    FeeObservation, AnchorFeeHistory,
-};
 pub mod contract;
-pub mod stellar_toml;
 
+// ── std-only modules (filesystem, runtime config) ─────────────────────────────
+#[cfg(feature = "std")]
+pub mod config;
+
+// ── Host-only modules (HTTP, threading) ───────────────────────────────────────
+// Excluded from `wasm` builds: on-chain Soroban contracts have no network access.
+#[cfg(not(feature = "wasm"))]
+mod response_validator;
+#[cfg(not(feature = "wasm"))]
+pub mod webhook;
+#[cfg(not(feature = "wasm"))]
+pub mod sep6;
+#[cfg(not(feature = "wasm"))]
+pub mod sep24;
+#[cfg(not(feature = "wasm"))]
+pub mod sep38;
+#[cfg(not(feature = "wasm"))]
+pub mod stellar_toml;
+#[cfg(not(feature = "wasm"))]
+pub mod streaming_monitor;
+
+// ── Mock helpers (test / CI without live anchor) ──────────────────────────────
+#[cfg(feature = "mock-only")]
+pub mod mock;
+
+// ── Core re-exports ───────────────────────────────────────────────────────────
 pub use domain_validator::validate_anchor_domain;
 pub use errors::{AnchorKitError, ErrorCode};
 pub use errors::normalize_asset_code;
-pub use stellar_toml::{ParsedCurrency, ParsedStellarToml, parse_stellar_toml, fetch_stellar_toml_url};
-
 /// Backward-compatible alias. Prefer [`AnchorKitError`] for new code.
 pub use errors::Error;
 pub use rate_limiter::{RateLimiter, RateLimitConfig, RateLimitState};
+pub use retry::{retry_with_backoff, is_retryable, RetryConfig, JitterSource, LedgerJitterSource, MockJitterSource};
+pub use deterministic_hash::{compute_payload_hash, verify_payload_hash};
+pub use contract::{AnchorKitContract, EndpointUpdated, CacheConfig};
+pub use transaction_state_tracker::{TransactionState, TransactionStateRecord, RecoveryMetadata, OptRecovery};
+pub use transaction_state_tracker::{StorageBudgetMonitor, TransactionStateTracker};
+
+// ── std-only re-exports ───────────────────────────────────────────────────────
+#[cfg(feature = "std")]
+pub use config::{load_runtime_config_file, parse_runtime_config_str, ConfigFormat, RuntimeConfig};
+
+// ── Host-only re-exports ──────────────────────────────────────────────────────
+#[cfg(not(feature = "wasm"))]
 pub use response_validator::{
     validate_anchor_info_response, validate_deposit_response, validate_quote_response,
     validate_sep38_quote_response, validate_withdraw_response, validate_stellar_asset,
+    validate_stellar_account_id, normalize_stellar_account_id,
     AnchorInfoResponse, DepositResponse as ValidatorDepositResponse, QuoteResponse,
     Sep38QuoteResponse, WithdrawResponse,
 };
-pub use retry::{retry_with_backoff, is_retryable, RetryConfig, JitterSource, LedgerJitterSource, MockJitterSource};
-pub use deterministic_hash::{compute_payload_hash, verify_payload_hash};
-#[cfg(feature = "std")]
-pub use config::{load_runtime_config_file, parse_runtime_config_str, ConfigFormat, RuntimeConfig};
+#[cfg(not(feature = "wasm"))]
 pub use webhook::{deliver_webhook, get_dead_letter_webhooks, query_dlq, WebhookDeliveryConfig, DlqEntry};
-
+#[cfg(not(feature = "wasm"))]
+pub use stellar_toml::{ParsedCurrency, ParsedStellarToml, parse_stellar_toml, fetch_stellar_toml_url};
+#[cfg(not(feature = "wasm"))]
 pub use sep6::{
     fetch_transaction_status, initiate_deposit, initiate_withdrawal, DepositResponse,
     RawDepositResponse, RawTransactionResponse, RawWithdrawalResponse, TransactionKind,
     TransactionStatus, TransactionStatusResponse, WithdrawalResponse,
     poll_transaction_status, PollConfig, PollResult,
 };
+#[cfg(not(feature = "wasm"))]
 pub use sep24::{
     initiate_interactive_deposit, initiate_interactive_withdrawal, fetch_sep24_transaction_status,
     validate_interactive_url, validate_transaction_id,
@@ -160,6 +198,7 @@ pub use sep24::{
     RawInteractiveDepositResponse, RawInteractiveWithdrawalResponse, RawSep24TransactionResponse,
 };
 pub use contract::{AnchorKitContract, EndpointUpdated, CacheConfig};
+pub use contract::{HealthStatus, MetadataFreshnessReport, RateLimiterHealth};
 pub use transaction_state_tracker::{TransactionState, TransactionStateRecord, RecoveryMetadata};
 pub use transaction_state_tracker::{StorageBudgetMonitor, TransactionStateTracker};
 pub mod streaming_monitor;
@@ -167,3 +206,9 @@ pub use streaming_monitor::{StreamingTransactionMonitor, TransactionStatusUpdate
 
 #[cfg(test)]
 mod stellar_toml_tests;
+
+#[cfg(test)]
+mod ledger_boundary_tests;
+
+#[cfg(test)]
+mod boundary_test_helpers;

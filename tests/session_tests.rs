@@ -1,5 +1,7 @@
 #![cfg(test)]
 
+mod sep10_test_util;
+
 mod session_tests {
     use soroban_sdk::{
         testutils::{Address as _, Ledger, LedgerInfo},
@@ -115,7 +117,7 @@ mod session_tests {
         let session_id = client.create_session(&user);
         let sk_reg = SigningKey::generate(&mut OsRng);
         let pk_reg = soroban_sdk::BytesN::from_array(&env, sk_reg.verifying_key().as_bytes());
-        client.register_attestor_with_session(&session_id, &attestor, &pk_reg);
+        client.register_attestor_with_session(&admin, &session_id, &attestor, &pk_reg);
 
         assert_eq!(client.get_session_operation_count(&session_id), 1);
     }
@@ -170,7 +172,7 @@ mod session_tests {
         let session_id = client.create_session(&user);
         let sk = SigningKey::generate(&mut OsRng);
         let pk = soroban_sdk::BytesN::from_array(&env, sk.verifying_key().as_bytes());
-        client.register_attestor_with_session(&session_id, &attestor, &pk);
+        client.register_attestor_with_session(&admin, &session_id, &attestor, &pk);
 
         assert!(client.is_attestor(&attestor));
     }
@@ -190,7 +192,7 @@ mod session_tests {
         let session_id = client.create_session(&user);
         let sk = SigningKey::generate(&mut OsRng);
         let pk = soroban_sdk::BytesN::from_array(&env, sk.verifying_key().as_bytes());
-        client.register_attestor_with_session(&session_id, &attestor, &pk);
+        client.register_attestor_with_session(&admin, &session_id, &attestor, &pk);
 
         let log = client.get_audit_log(&0u64);
         assert_eq!(log.log_id, 0);
@@ -219,8 +221,8 @@ mod session_tests {
         let session_id = client.create_session(&user);
         let sk = SigningKey::generate(&mut OsRng);
         let pk = soroban_sdk::BytesN::from_array(&env, sk.verifying_key().as_bytes());
-        client.register_attestor_with_session(&session_id, &attestor, &pk);
-        client.revoke_attestor_with_session(&session_id, &attestor);
+        client.register_attestor_with_session(&admin, &session_id, &attestor, &pk);
+        client.revoke_attestor_with_session(&admin, &session_id, &attestor);
 
         assert!(!client.is_attestor(&attestor));
     }
@@ -240,8 +242,8 @@ mod session_tests {
         let session_id = client.create_session(&user);
         let sk2 = SigningKey::generate(&mut OsRng);
         let pk2 = soroban_sdk::BytesN::from_array(&env, sk2.verifying_key().as_bytes());
-        client.register_attestor_with_session(&session_id, &attestor, &pk2);
-        client.revoke_attestor_with_session(&session_id, &attestor);
+        client.register_attestor_with_session(&admin, &session_id, &attestor, &pk2);
+        client.revoke_attestor_with_session(&admin, &session_id, &attestor);
 
         // log_id 0 = register, log_id 1 = revoke
         let log = client.get_audit_log(&1u64);
@@ -271,7 +273,7 @@ mod session_tests {
         let session_id = client.create_session(&user);
         let sk = SigningKey::generate(&mut OsRng);
         let pk = soroban_sdk::BytesN::from_array(&env, sk.verifying_key().as_bytes());
-        client.register_attestor_with_session(&session_id, &attestor, &pk);
+        client.register_attestor_with_session(&admin, &session_id, &attestor, &pk);
         let ph = payload(&env, 0x01);
         let real_sig = sign_payload(&env, &sk, &ph);
         client.submit_attestation_with_session(
@@ -315,7 +317,7 @@ mod session_tests {
         // Step 2: register attestor with session
         let sk = SigningKey::generate(&mut OsRng);
         let pk = soroban_sdk::BytesN::from_array(&env, sk.verifying_key().as_bytes());
-        client.register_attestor_with_session(&session_id, &attestor, &pk);
+        client.register_attestor_with_session(&admin, &session_id, &attestor, &pk);
         assert!(client.is_attestor(&attestor));
 
         // Step 3: two attestations
@@ -522,7 +524,9 @@ mod session_tests {
         client.close_session(&session_id, &user);
 
         // Should panic with SessionClosed
-        client.register_attestor_with_session(&session_id, &attestor);
+        let sk = SigningKey::generate(&mut OsRng);
+        let pk = soroban_sdk::BytesN::from_array(&env, sk.verifying_key().as_bytes());
+        client.register_attestor_with_session(&admin, &session_id, &attestor, &pk);
     }
 
     // -----------------------------------------------------------------------

@@ -103,13 +103,19 @@ impl RetryConfig {
     /// Compute the delay (ms) for a given attempt index (0-based), drawing
     /// jitter from `jitter_source`.
     ///
-    /// delay = min(base * multiplier^attempt, max) + jitter(0..base/2)
+    /// The exponential component is `min(base * multiplier^attempt, max_delay_ms)`.
+    /// Jitter is drawn from `[0, base_delay_ms / 2]` and added to that, then
+    /// the total is capped at `max_delay_ms` so the configured ceiling is never
+    /// exceeded regardless of the jitter seed.
+    ///
+    /// `delay = min(min(base * multiplier^attempt, max) + jitter(0..=base/2), max)`
     pub fn delay_for_attempt(&self, attempt: u32, jitter_source: &mut impl JitterSource) -> u64 {
         let exp = (self.backoff_multiplier as u64).saturating_pow(attempt);
         let raw = self.base_delay_ms.saturating_mul(exp);
         let capped = raw.min(self.max_delay_ms);
-        let jitter = jitter_source.next_seed() % (self.base_delay_ms / 2 + 1);
-        capped.saturating_add(jitter)
+        let jitter_bound = self.base_delay_ms / 2 + 1;
+        let jitter = if jitter_bound == 0 { 0 } else { jitter_source.next_seed() % jitter_bound };
+        capped.saturating_add(jitter).min(self.max_delay_ms)
     }
 }
 
@@ -393,7 +399,7 @@ mod retry_tests {
     fn test_delay_capped_at_max() {
         let config = RetryConfig::new(10, 1000, 3_000, 2);
         let mut js = MockJitterSource::new(vec![0]);
-        assert!(config.delay_for_attempt(5, &mut js) <= 3_000 + config.base_delay_ms / 2 + 1);
+        assert!(config.delay_for_attempt(5, &mut js) <= config.max_delay_ms);
     }
 
     #[test]
@@ -480,19 +486,18 @@ mod retry_tests {
         assert_ne!(delay_a, delay_b);
     }
 
-    /// Delay is always within configured bounds (base..=max + max_jitter).
+    /// Delay is always within configured bounds [base..=max_delay_ms].
     #[test]
     fn test_delay_within_bounds() {
         let config = RetryConfig::new(6, 100, 3_000, 2);
-        let max_jitter = config.base_delay_ms / 2; // 50
         for seed in [0u64, 1, 25, 49, 50, 99, 1000] {
             for attempt in 0..6u32 {
                 let mut js = MockJitterSource::new(vec![seed]);
                 let delay = config.delay_for_attempt(attempt, &mut js);
                 assert!(delay >= config.base_delay_ms, "delay {delay} < base");
                 assert!(
-                    delay <= config.max_delay_ms + max_jitter,
-                    "delay {delay} > max+jitter"
+                    delay <= config.max_delay_ms,
+                    "delay {delay} > max_delay_ms"
                 );
             }
         }
@@ -545,5 +550,93 @@ mod retry_tests {
         assert_eq!(recorded[0], 100 + 3);  // attempt 0: 100*2^0 + 3
         assert_eq!(recorded[1], 200 + 20); // attempt 1: 100*2^1 + 20
         assert_eq!(recorded[2], 400 + 37); // attempt 2: 100*2^2 + 37
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #347 — deterministic jitter source tests
+    // -----------------------------------------------------------------------
+
+    /// LedgerJitterSource seed formula: sequence ^ timestamp ^ counter (counter starts at 0).
+    #[test]
+    fn test_ledger_jitter_source_seed_formula() {
+        let seq: u32 = 42;
+        let ts: u64 = 1_000_000;
+        let mut js = LedgerJitterSource::new(seq, ts);
+
+        assert_eq!(js.next_seed(), (seq as u64) ^ ts ^ 0);
+        assert_eq!(js.next_seed(), (seq as u64) ^ ts ^ 1);
+        assert_eq!(js.next_seed(), (seq as u64) ^ ts ^ 2);
+    }
+
+    /// LedgerJitterSource counter wraps via wrapping_add — no panic at saturation.
+    #[test]
+    fn test_ledger_jitter_source_counter_wraps() {
+        // Build a source whose counter is already at u64::MAX
+        let seq: u32 = 1;
+        let ts: u64 = 0;
+        let mut js = LedgerJitterSource { sequence: seq, timestamp: ts, counter: u64::MAX };
+        let seed = js.next_seed();
+        assert_eq!(seed, (seq as u64) ^ ts ^ u64::MAX);
+        // Next call after wrapping — counter should have wrapped to 0
+        let seed2 = js.next_seed();
+        assert_eq!(seed2, (seq as u64) ^ ts ^ 0);
+    }
+
+    /// MockJitterSource cycles back to the first seed when the list is exhausted.
+    #[test]
+    fn test_mock_jitter_source_cycles_when_exhausted() {
+        let mut js = MockJitterSource::new(vec![10, 20]);
+        assert_eq!(js.next_seed(), 10);
+        assert_eq!(js.next_seed(), 20);
+        assert_eq!(js.next_seed(), 10); // wraps back
+        assert_eq!(js.next_seed(), 20);
+    }
+
+    /// MockJitterSource with an empty seed list always returns 0.
+    #[test]
+    fn test_mock_jitter_source_empty_returns_zero() {
+        let mut js = MockJitterSource::new(vec![]);
+        assert_eq!(js.next_seed(), 0);
+        assert_eq!(js.next_seed(), 0);
+    }
+
+    /// delay_for_attempt with base_delay_ms = 0 produces 0 delay (no jitter).
+    #[test]
+    fn test_delay_for_attempt_zero_base() {
+        let config = RetryConfig::new(3, 0, 1_000, 2);
+        let mut js = MockJitterSource::new(vec![999]);
+        assert_eq!(config.delay_for_attempt(0, &mut js), 0);
+        assert_eq!(config.delay_for_attempt(1, &mut js), 0);
+    }
+
+    /// Total delay (including jitter) never exceeds max_delay_ms.
+    #[test]
+    fn test_jitter_does_not_push_past_max_delay() {
+        let config = RetryConfig::new(5, 1000, 3_000, 2);
+        // Use a large seed to maximise jitter contribution
+        for seed in [u64::MAX, 9999, 1000, 500] {
+            for attempt in 0..5u32 {
+                let mut js = MockJitterSource::new(vec![seed]);
+                let delay = config.delay_for_attempt(attempt, &mut js);
+                assert!(
+                    delay <= config.max_delay_ms,
+                    "attempt={attempt} seed={seed}: delay {delay} > max {}",
+                    config.max_delay_ms
+                );
+            }
+        }
+    }
+
+    /// Delays at each attempt level match the expected exponential formula.
+    #[test]
+    fn test_delay_per_attempt_level() {
+        // Use seed 0 (zero jitter) so we test the pure exponential component.
+        let config = RetryConfig::new(6, 100, 10_000, 2);
+        let expected = [100u64, 200, 400, 800, 1600, 3200];
+        for (attempt, &exp) in expected.iter().enumerate() {
+            let mut js = MockJitterSource::new(vec![0]);
+            assert_eq!(config.delay_for_attempt(attempt as u32, &mut js), exp,
+                "attempt {attempt}: expected {exp}");
+        }
     }
 }

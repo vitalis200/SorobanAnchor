@@ -82,7 +82,9 @@ pub enum ErrorCode {
     IllegalTransition         = 24,
     SessionExpired            = 25,
     SessionClosed             = 26,
-    UnsupportedCapabilityVersion = 29,
+    UnsupportedCapabilityVersion = 27,
+    /// Caller does not hold the required admin role for this operation.
+    Unauthorized              = 28,
 
     // Session / routing errors (30–31)
     SessionOperationLimitExceeded = 30,
@@ -149,6 +151,7 @@ impl ErrorCode {
             ErrorCode::SessionExpired            => "Session has expired",
             ErrorCode::SessionClosed                  => "Session is closed",
             ErrorCode::UnsupportedCapabilityVersion    => "Service capability version is unsupported",
+            ErrorCode::Unauthorized                    => "Caller is not authorized for this operation",
             ErrorCode::SessionOperationLimitExceeded   => "Session operation limit exceeded",
             ErrorCode::InvalidWeights                  => "Routing weights must sum to 1.0",
             ErrorCode::CacheExpired              => "Cache entry has expired",
@@ -321,6 +324,7 @@ impl AnchorKitError {
     pub fn session_closed() -> Self { Self::from_code(ErrorCode::SessionClosed) }
     pub fn session_operation_limit_exceeded() -> Self { Self::from_code(ErrorCode::SessionOperationLimitExceeded) }
     pub fn invalid_weights() -> Self { Self::from_code(ErrorCode::InvalidWeights) }
+    pub fn unauthorized() -> Self { Self::from_code(ErrorCode::Unauthorized) }
     pub fn cache_expired() -> Self { Self::from_code(ErrorCode::CacheExpired) }
     pub fn cache_not_found() -> Self { Self::from_code(ErrorCode::CacheNotFound) }
     pub fn attestor_profile_not_found() -> Self { Self::from_code(ErrorCode::AttestorProfileNotFound) }
@@ -461,6 +465,7 @@ mod tests {
         assert_eq!(AnchorKitError::kyc_pending().code,                  ErrorCode::KycPending);
         assert_eq!(AnchorKitError::kyc_rejected().code,                 ErrorCode::KycRejected);
         assert_eq!(AnchorKitError::webhook_delivery_failed().code,      ErrorCode::WebhookDeliveryFailed);
+        assert_eq!(AnchorKitError::unauthorized().code,                 ErrorCode::Unauthorized);
     }
 
     #[test]
@@ -506,6 +511,7 @@ mod tests {
             ErrorCode::AttestorProfileNotFound,
             ErrorCode::InvalidRequestContext,
             ErrorCode::InvalidSessionMetadata,
+            ErrorCode::Unauthorized,
         ];
         for code in codes {
             assert!(!code.default_message().is_empty());
@@ -523,6 +529,7 @@ mod tests {
         assert_eq!(ErrorCode::SessionExpired        as u32, 25);
         assert_eq!(ErrorCode::SessionClosed         as u32, 26);
         assert_eq!(ErrorCode::UnsupportedCapabilityVersion as u32, 27);
+        assert_eq!(ErrorCode::Unauthorized          as u32, 28);
         assert_eq!(ErrorCode::CacheExpired          as u32, 48);
         assert_eq!(ErrorCode::CacheNotFound         as u32, 49);
         assert_eq!(ErrorCode::AttestorProfileNotFound as u32, 50);
