@@ -326,6 +326,49 @@ pub struct KycRecord {
 }
 
 // ---------------------------------------------------------------------------
+// Health check types (#268)
+// ---------------------------------------------------------------------------
+
+/// Overall contract health state returned by [`AnchorKitContract::get_health_status`].
+#[contracttype]
+#[derive(Copy, Clone, Debug, PartialEq)]
+#[repr(u32)]
+pub enum HealthStatus {
+    /// Contract is initialized and all subsystems are operational.
+    Healthy = 0,
+    /// Contract is initialized but one or more subsystems are using fallback defaults.
+    Degraded = 1,
+    /// Contract has not been initialized.
+    Unavailable = 2,
+}
+
+/// Metadata freshness report returned by [`AnchorKitContract::get_metadata_freshness`].
+#[contracttype]
+#[derive(Clone)]
+pub struct MetadataFreshnessReport {
+    pub anchor: Address,
+    pub state: MetadataCacheState,
+    /// Age of the cached entry in seconds (0 when missing).
+    pub age_seconds: u64,
+    /// Whether a background refresh is recommended.
+    pub needs_refresh: bool,
+}
+
+/// Rate limiter health report returned by [`AnchorKitContract::get_rate_limiter_health`].
+#[contracttype]
+#[derive(Clone)]
+pub struct RateLimiterHealth {
+    pub attestor: Address,
+    /// Effective submission count in the current window (0 if window expired).
+    pub submission_count: u32,
+    pub max_submissions: u32,
+    pub window_length: u32,
+    pub window_start_ledger: u32,
+    /// `true` when the attestor has reached the submission limit.
+    pub is_throttled: bool,
+}
+
+// ---------------------------------------------------------------------------
 // Metadata cache types
 // ---------------------------------------------------------------------------
 
@@ -3350,6 +3393,82 @@ impl AnchorKitContract {
         env.storage()
             .temporary()
             .extend_ttl(&key, SPAN_TTL, SPAN_TTL);
+    }
+
+    // -----------------------------------------------------------------------
+    // Health check APIs (#268)
+    // -----------------------------------------------------------------------
+
+    /// Overall service health status.
+    ///
+    /// Returns `Healthy` when the contract is initialized and the rate limiter
+    /// config is present. Returns `Degraded` when initialized but the rate
+    /// limiter config is missing (default fallback in use). Returns
+    /// `Unavailable` when the contract has not been initialized.
+    pub fn get_health_status(env: Env) -> HealthStatus {
+        if !env.storage().persistent().has(&initialized_key(&env)) {
+            return HealthStatus::Unavailable;
+        }
+        let rl_key = make_storage_key(&env, &[b"RL_CONFIG"]);
+        if env.storage().persistent().has(&rl_key) {
+            HealthStatus::Healthy
+        } else {
+            HealthStatus::Degraded
+        }
+    }
+
+    /// Metadata freshness report for a given anchor.
+    ///
+    /// Returns the cache state together with the age of the entry in seconds
+    /// (zero when missing). Callers can use this to detect stale or expired
+    /// metadata without triggering a panic.
+    pub fn get_metadata_freshness(env: Env, anchor: Address) -> MetadataFreshnessReport {
+        let key = (symbol_short!("METACACHE"), anchor.clone());
+        match env.storage().temporary().get::<_, MetadataCache>(&key) {
+            None => MetadataFreshnessReport {
+                anchor,
+                state: MetadataCacheState::Missing,
+                age_seconds: 0,
+                needs_refresh: false,
+            },
+            Some(entry) => {
+                let now = env.ledger().timestamp();
+                let age = now.saturating_sub(entry.cached_at);
+                let state = if age <= entry.ttl_seconds {
+                    MetadataCacheState::Fresh
+                } else if age <= entry.ttl_seconds.saturating_add(entry.stale_ttl_seconds) {
+                    MetadataCacheState::Stale
+                } else {
+                    MetadataCacheState::Expired
+                };
+                MetadataFreshnessReport {
+                    anchor,
+                    state,
+                    age_seconds: age,
+                    needs_refresh: entry.needs_refresh || state != MetadataCacheState::Fresh,
+                }
+            }
+        }
+    }
+
+    /// Rate limiter health for a given attestor.
+    ///
+    /// Returns the current submission count, window start ledger, configured
+    /// limits, and whether the attestor is currently throttled.
+    pub fn get_rate_limiter_health(env: Env, attestor: Address) -> RateLimiterHealth {
+        let config = RateLimiter::get_config(&env);
+        let state = RateLimiter::get_state(&env, &attestor);
+        let current_ledger = env.ledger().sequence();
+        let window_expired = state.window_start_ledger.saturating_add(config.window_length) <= current_ledger;
+        let effective_count = if window_expired { 0 } else { state.submission_count };
+        RateLimiterHealth {
+            attestor,
+            submission_count: effective_count,
+            max_submissions: config.max_submissions,
+            window_length: config.window_length,
+            window_start_ledger: state.window_start_ledger,
+            is_throttled: !window_expired && effective_count >= config.max_submissions,
+        }
     }
 
     /// Append `operation_name` to the `RequestContext` stored under `root_id_bytes`.

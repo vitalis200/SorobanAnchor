@@ -8,7 +8,31 @@ use anchorkit::contract::AnchorKitContractClient;
 
 pub fn build_sep10_jwt(signing_key: &SigningKey, sub: &str, exp: u64) -> std::string::String {
     let header = r#"{"alg":"EdDSA","typ":"JWT"}"#;
-    let payload = format!(r#"{{"sub":"{}","exp":{}}}"#, sub, exp);
+    let payload = format!(
+        r#"{{"sub":"{}","exp":{},"iss":"https://anchor.example.com"}}"#,
+        sub, exp
+    );
+    let header_b64 = URL_SAFE_NO_PAD.encode(header);
+    let payload_b64 = URL_SAFE_NO_PAD.encode(payload);
+    let signing_input = format!("{}.{}", header_b64, payload_b64);
+    let sig = signing_key.sign(signing_input.as_bytes());
+    let sig_b64 = URL_SAFE_NO_PAD.encode(sig.to_bytes());
+    format!("{}.{}", signing_input, sig_b64)
+}
+
+/// Build a SEP-10 JWT that includes an explicit `iat` claim (used to test
+/// the maximum token lifetime check: `exp - iat <= 86400`).
+pub fn build_sep10_jwt_with_iat(
+    signing_key: &SigningKey,
+    sub: &str,
+    iat: u64,
+    exp: u64,
+) -> std::string::String {
+    let header = r#"{"alg":"EdDSA","typ":"JWT"}"#;
+    let payload = format!(
+        r#"{{"sub":"{}","iat":{},"exp":{},"iss":"https://anchor.example.com"}}"#,
+        sub, iat, exp
+    );
     let header_b64 = URL_SAFE_NO_PAD.encode(header);
     let payload_b64 = URL_SAFE_NO_PAD.encode(payload);
     let signing_input = format!("{}.{}", header_b64, payload_b64);

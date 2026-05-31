@@ -1,4 +1,10 @@
-use anchorkit::normalize_stellar_account_id;
+#![cfg(feature = "std")]
+//! CLI binary for AnchorKit.
+//!
+//! This binary is only available when building with the `std` feature (the default).
+//! For WASM builds, disable default features:
+//!   cargo build --target wasm32-unknown-unknown --no-default-features --features wasm
+
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 
@@ -278,6 +284,24 @@ enum Commands {
         /// Attempt to automatically fix issues
         #[arg(long)]
         fix: bool,
+    },
+    /// Query contract health, metadata freshness, and rate limiter status
+    Health {
+        /// Contract ID to query (or set ANCHOR_CONTRACT_ID)
+        #[arg(long)]
+        contract_id: String,
+        #[arg(long, default_value = "testnet")]
+        network: String,
+        #[arg(long)]
+        secret_key: Option<String>,
+        #[arg(long)]
+        keypair_file: Option<String>,
+        /// Anchor address to check metadata freshness for (optional)
+        #[arg(long)]
+        anchor: Option<String>,
+        /// Attestor address to check rate limiter health for (optional)
+        #[arg(long)]
+        attestor: Option<String>,
     },
     /// Manage custom network profiles
     Network {
@@ -958,6 +982,62 @@ fn doctor(network: &str, fix: bool) {
     }
 }
 
+// ── Health check command (#268) ───────────────────────────────────────────────
+
+fn health_check(contract_id: &str, network: &str, source: &SecretKey, anchor: Option<&str>, attestor: Option<&str>) {
+    println!("\n🏥 AnchorKit Health Check\n");
+
+    // 1. Overall service health
+    let status_raw = stellar_invoke(contract_id, source, network, &["get_health_status"]);
+    let status_label = match status_raw.trim().trim_matches('"') {
+        "0" | "Healthy"     => "\x1b[32m✓ Healthy\x1b[0m",
+        "1" | "Degraded"    => "\x1b[33m⚠ Degraded\x1b[0m",
+        _                   => "\x1b[31m✗ Unavailable\x1b[0m",
+    };
+    println!("  Service Status : {status_label}");
+
+    // 2. Metadata freshness (optional — only when --anchor is supplied)
+    if let Some(anchor_addr) = anchor {
+        let freshness_raw = stellar_invoke(contract_id, source, network, &[
+            "get_metadata_freshness",
+            "--anchor", anchor_addr,
+        ]);
+        // Parse the returned struct fields from JSON-like output
+        let state_label = if freshness_raw.contains("\"Fresh\"") || freshness_raw.contains("\"state\":0") {
+            "\x1b[32mFresh\x1b[0m"
+        } else if freshness_raw.contains("\"Stale\"") || freshness_raw.contains("\"state\":2") {
+            "\x1b[33mStale — refresh recommended\x1b[0m"
+        } else if freshness_raw.contains("\"Expired\"") || freshness_raw.contains("\"state\":3") {
+            "\x1b[31mExpired — must refresh\x1b[0m"
+        } else {
+            "\x1b[31mMissing — no cache entry\x1b[0m"
+        };
+        println!("  Metadata Cache : {state_label}");
+        println!("  Anchor         : {anchor_addr}");
+    }
+
+    // 3. Rate limiter health (optional — only when --attestor is supplied)
+    if let Some(attestor_addr) = attestor {
+        let rl_raw = stellar_invoke(contract_id, source, network, &[
+            "get_rate_limiter_health",
+            "--attestor", attestor_addr,
+        ]);
+        let throttled = rl_raw.contains("\"is_throttled\":true") || rl_raw.contains("is_throttled: true");
+        let rl_label = if throttled {
+            "\x1b[31m✗ Throttled\x1b[0m"
+        } else {
+            "\x1b[32m✓ OK\x1b[0m"
+        };
+        println!("  Rate Limiter   : {rl_label}");
+        println!("  Attestor       : {attestor_addr}");
+        if throttled {
+            eprintln!("\n  ⚠  Attestor has reached the submission limit for the current window.");
+        }
+    }
+
+    println!();
+}
+
 // ── Network command ───────────────────────────────────────────────────────────
 
 fn network_cmd(action: NetworkAction) {
@@ -1225,6 +1305,10 @@ fn main() {
         }
         Commands::Doctor { fix } => {
             doctor(&network, fix);
+        }
+        Commands::Health { contract_id, network: cmd_net, secret_key, keypair_file, anchor, attestor } => {
+            let source = resolve_source(secret_key.as_deref(), keypair_file.as_deref(), None);
+            health_check(&contract_id, &cmd_net, &source, anchor.as_deref(), attestor.as_deref());
         }
         Commands::Network { action } => {
             network_cmd(action);

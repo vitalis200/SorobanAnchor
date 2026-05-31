@@ -153,6 +153,7 @@ pub use sep24::{
     RawInteractiveDepositResponse, RawInteractiveWithdrawalResponse, RawSep24TransactionResponse,
 };
 pub use contract::{AnchorKitContract, EndpointUpdated, CacheConfig};
+pub use contract::{HealthStatus, MetadataFreshnessReport, RateLimiterHealth};
 pub use transaction_state_tracker::{TransactionState, TransactionStateRecord, RecoveryMetadata};
 pub use transaction_state_tracker::{StorageBudgetMonitor, TransactionStateTracker};
 pub mod streaming_monitor;
@@ -160,3 +161,9 @@ pub use streaming_monitor::{StreamingTransactionMonitor, TransactionStatusUpdate
 
 #[cfg(test)]
 mod stellar_toml_tests;
+
+#[cfg(test)]
+mod ledger_boundary_tests;
+
+#[cfg(test)]
+mod boundary_test_helpers;

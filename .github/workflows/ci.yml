@@ -12,7 +12,9 @@ env:
   WASM_OUT: target/wasm32-unknown-unknown/release/anchorkit.wasm
 
 jobs:
+  # ── Core CI ────────────────────────────────────────────────────────────────
   ci:
+    name: Build, Lint & Unit Tests
     runs-on: ubuntu-latest
 
     steps:
@@ -39,7 +41,10 @@ jobs:
       - name: no_std compliance check (WASM)
         run: cargo check --target ${{ env.WASM_TARGET }} --no-default-features --features wasm
 
-      - name: cargo test
+      - name: cargo clippy
+        run: cargo clippy -- -D warnings
+
+      - name: cargo test (unit + integration)
         run: cargo test
 
       - name: cargo build WASM
@@ -57,3 +62,74 @@ jobs:
           wasm-opt -Oz --strip-debug "$WASM_IN" -o "$WASM_OPT"
           echo "=== Optimized WASM size ==="
           ls -lh "$WASM_OPT"
+
+  # ── CLI Integration Test Harness ───────────────────────────────────────────
+  integration:
+    name: CLI Integration Harness
+    runs-on: ubuntu-latest
+    needs: ci
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-integration-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Run CLI integration test harness (local simulation)
+        run: cargo test --test cli_integration_harness -- --nocapture
+
+  # ── Release Packaging ──────────────────────────────────────────────────────
+  release-package:
+    name: Release Packaging
+    runs-on: ubuntu-latest
+    # Only run on pushes to main, not on PRs
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [ci, integration]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Install binaryen (wasm-opt)
+        run: sudo apt-get install -y binaryen
+
+      - name: Build release artifacts
+        run: bash scripts/package_release.sh
+
+      - name: Validate release bundle
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*= *"\(.*\)"/\1/')
+          bash scripts/validate_bundle.sh "dist/anchorkit-${VERSION}.tar.gz"
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: anchorkit-release
+          path: dist/
+          retention-days: 30

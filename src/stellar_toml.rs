@@ -1,4 +1,4 @@
-//! Minimal stellar.toml capability parser.
+//! Minimal stellar.toml capability parser and discovery helper.
 //!
 //! Parses the key=value fields relevant to anchor capability discovery
 //! (SEP-6, SEP-24, SEP-10, SEP-31, SEP-38, KYC) from a raw stellar.toml string.
@@ -19,12 +19,20 @@
 //! strictly with [`validate_anchor_domain`]; an invalid URL is a hard error.
 //! Every other field is optional: when absent it parses to `None`/empty rather
 //! than failing, so incomplete-but-acceptable configurations are tolerated.
+//!
+//! ## Resilient discovery (issue #289)
+//!
+//! [`fetch_stellar_toml_with_retry`] wraps the URL-construction step with
+//! configurable retry and optional fallback-host support so that transient
+//! DNS or network failures do not permanently block anchor discovery.
+//! See [`StellarTomlFetchConfig`] for the full set of knobs.
 
 extern crate alloc;
 use alloc::{string::String, vec::Vec};
 
 use crate::domain_validator::validate_anchor_domain;
 use crate::errors::AnchorKitError;
+use crate::retry::{retry_with_backoff, JitterSource, RetryConfig};
 
 /// A single currency/asset declared in a `[[CURRENCIES]]` table.
 ///
@@ -274,4 +282,186 @@ fn parse_kv(line: &str) -> Option<(&str, String)> {
         return None;
     }
     Some((key, String::from(value)))
+}
+
+// ---------------------------------------------------------------------------
+// Resilient stellar.toml discovery (issue #289)
+// ---------------------------------------------------------------------------
+
+/// Configuration for resilient stellar.toml discovery.
+///
+/// Controls retry behaviour and optional fallback hosts used when the primary
+/// domain is unreachable. All hosts (primary and fallbacks) must pass
+/// [`validate_anchor_domain`] before any fetch is attempted.
+///
+/// # Examples
+///
+/// ```rust
+/// use anchorkit::stellar_toml::{StellarTomlFetchConfig};
+/// use anchorkit::retry::RetryConfig;
+///
+/// // Default: 3 attempts, no fallbacks.
+/// let cfg = StellarTomlFetchConfig::default();
+/// assert_eq!(cfg.retry.max_attempts, 3);
+/// assert!(cfg.fallback_hosts.is_empty());
+///
+/// // With a mirror fallback.
+/// let cfg = StellarTomlFetchConfig {
+///     retry: RetryConfig::new(4, 100, 5_000, 2),
+///     fallback_hosts: alloc::vec!["https://mirror.example.com".into()],
+/// };
+/// assert_eq!(cfg.fallback_hosts.len(), 1);
+/// ```
+#[derive(Clone, Debug)]
+pub struct StellarTomlFetchConfig {
+    /// Retry parameters applied to each host (primary and each fallback).
+    pub retry: RetryConfig,
+    /// Optional mirror / fallback hosts tried in order after the primary host
+    /// exhausts its retry budget. Each entry must be a valid HTTPS origin
+    /// (validated by [`validate_anchor_domain`]).
+    pub fallback_hosts: Vec<String>,
+}
+
+impl Default for StellarTomlFetchConfig {
+    fn default() -> Self {
+        StellarTomlFetchConfig {
+            retry: RetryConfig::default(),
+            fallback_hosts: Vec::new(),
+        }
+    }
+}
+
+/// The outcome of a resilient stellar.toml fetch attempt.
+///
+/// Returned by [`fetch_stellar_toml_with_retry`] so callers can distinguish
+/// between a successful primary fetch and a successful fallback fetch.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StellarTomlFetchResult {
+    /// The URL that ultimately succeeded.
+    pub resolved_url: String,
+    /// The raw stellar.toml content returned by that URL.
+    pub raw_content: String,
+    /// `true` when the result came from a fallback host rather than the
+    /// primary domain.
+    pub used_fallback: bool,
+}
+
+/// Fetch a stellar.toml with retry and optional fallback-host support.
+///
+/// This function is the production entry-point for anchor discovery. It:
+///
+/// 1. Constructs the well-known URL for `primary_domain` via
+///    [`fetch_stellar_toml_url`].
+/// 2. Calls `fetch_fn` up to `config.retry.max_attempts` times with
+///    exponential backoff (using `jitter_source` for jitter seeds).
+/// 3. If all retries against the primary host fail, repeats the same retry
+///    loop for each host in `config.fallback_hosts` in order.
+/// 4. Returns the first successful [`StellarTomlFetchResult`], or the last
+///    error if every host and every retry is exhausted.
+///
+/// The `fetch_fn` closure receives the fully-qualified stellar.toml URL and
+/// returns either the raw TOML string or an [`AnchorKitError`]. Inject a real
+/// HTTP client in production and a mock closure in tests.
+///
+/// # Arguments
+///
+/// * `primary_domain` — The anchor's primary HTTPS origin
+///   (e.g. `"https://anchor.example.com"`).
+/// * `config` — Retry and fallback configuration.
+/// * `fetch_fn` — Closure that performs the actual HTTP GET.
+/// * `sleep_fn` — Callback invoked with the delay in milliseconds between
+///   retries. Pass `|_| {}` in tests to avoid real sleeps.
+/// * `jitter_source` — Provides per-attempt seeds for jitter computation.
+///
+/// # Errors
+///
+/// Returns the last [`AnchorKitError`] produced by `fetch_fn` after all hosts
+/// and all retries are exhausted.
+///
+/// # Examples
+///
+/// ```rust
+/// use anchorkit::stellar_toml::{fetch_stellar_toml_with_retry, StellarTomlFetchConfig};
+/// use anchorkit::retry::MockJitterSource;
+///
+/// let config = StellarTomlFetchConfig::default();
+/// let mut js = MockJitterSource::new(alloc::vec![0u64; 10]);
+///
+/// // Simulate a fetch that always succeeds.
+/// let result = fetch_stellar_toml_with_retry(
+///     "https://anchor.example.com",
+///     &config,
+///     |_url| Ok("NETWORK_PASSPHRASE = \"Test\"".into()),
+///     |_ms| {},
+///     &mut js,
+/// )
+/// .unwrap();
+///
+/// assert_eq!(result.used_fallback, false);
+/// assert!(result.raw_content.contains("NETWORK_PASSPHRASE"));
+/// ```
+pub fn fetch_stellar_toml_with_retry<F, S, J>(
+    primary_domain: &str,
+    config: &StellarTomlFetchConfig,
+    mut fetch_fn: F,
+    mut sleep_fn: S,
+    jitter_source: &mut J,
+) -> Result<StellarTomlFetchResult, AnchorKitError>
+where
+    F: FnMut(&str) -> Result<String, AnchorKitError>,
+    S: FnMut(u64),
+    J: JitterSource,
+{
+    // Build the ordered list of hosts: primary first, then fallbacks.
+    let mut hosts: Vec<(String, bool)> = Vec::new();
+    hosts.push((String::from(primary_domain), false));
+    for fb in &config.fallback_hosts {
+        hosts.push((fb.clone(), true));
+    }
+
+    let mut last_err: Option<AnchorKitError> = None;
+
+    for (host, is_fallback) in hosts {
+        // Validate the host before attempting any fetch.
+        let url = match fetch_stellar_toml_url(&host) {
+            Ok(u) => u,
+            Err(e) => {
+                last_err = Some(e);
+                continue;
+            }
+        };
+
+        let url_clone = url.clone();
+        let result = retry_with_backoff(
+            &config.retry,
+            |_attempt| fetch_fn(&url_clone),
+            // All AnchorKitErrors from the fetch closure are treated as
+            // transient (network/DNS failures). Parse errors returned by the
+            // caller after calling parse_stellar_toml are not retried here.
+            |_err| true,
+            &mut sleep_fn,
+            jitter_source,
+        );
+
+        match result {
+            Ok(raw_content) => {
+                return Ok(StellarTomlFetchResult {
+                    resolved_url: url,
+                    raw_content,
+                    used_fallback: is_fallback,
+                });
+            }
+            Err(e) => {
+                last_err = Some(e);
+                // Continue to the next host.
+            }
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| {
+        AnchorKitError::new(
+            crate::errors::ErrorCode::InvalidEndpointFormat,
+            "No hosts configured for stellar.toml discovery",
+        )
+    }))
 }
