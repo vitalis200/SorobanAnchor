@@ -101,6 +101,17 @@ impl RateLimiter {
         attestor: &Address,
         config: &RateLimitConfig,
     ) -> Result<(), AnchorKitError> {
+        // If attestor is the admin, skip rate limits entirely
+        if let Some(admin) = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&make_storage_key(env, &[b"ADMIN"]))
+        {
+            if *attestor == admin {
+                return Ok(());
+            }
+        }
+        
         let current_ledger = env.ledger().sequence();
         let state_key = Self::get_state_key(env, attestor);
         
@@ -405,6 +416,45 @@ mod tests {
         });
         assert_eq!(config.max_submissions, 20);
         assert_eq!(config.window_length, 200);
+    }
+
+    #[test]
+    fn test_admin_bypasses_rate_limits() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+        let non_admin = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+        let config = RateLimitConfig { max_submissions: 2, window_length: 100 };
+        
+        let contract_address = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+        let contract_id = env.register_contract(&contract_address, crate::contract::AnchorKitContract);
+        
+        // Store admin in instance storage
+        env.as_contract(&contract_id, &|| {
+            env.storage()
+                .instance()
+                .set(&make_storage_key(&env, &[b"ADMIN"]), &admin);
+        });
+        
+        // Non-admin should be rate limited
+        env.as_contract(&contract_id, &|| {
+            assert!(RateLimiter::check_and_increment(&env, &non_admin, &config).is_ok());
+            assert!(RateLimiter::check_and_increment(&env, &non_admin, &config).is_ok());
+            assert!(RateLimiter::check_and_increment(&env, &non_admin, &config).is_err());
+        });
+        
+        // Admin should never be rate limited
+        env.as_contract(&contract_id, &|| {
+            for _ in 0..10 {
+                assert!(RateLimiter::check_and_increment(&env, &admin, &config).is_ok());
+            }
+        });
+        
+        // Verify non-admin state still has max submissions (admin didn't affect it)
+        let state = env.as_contract(&contract_id, &|| {
+            RateLimiter::get_state(&env, &non_admin)
+        });
+        assert_eq!(state.submission_count, 2);
     }
 
     #[test]
