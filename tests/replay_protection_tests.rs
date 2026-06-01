@@ -73,6 +73,29 @@ mod replay_protection_tests {
         client.submit_attestation(&issuer, &subject, &1_000_002u64, &hash, &sig(&env));
     }
 
+    #[test]
+    fn test_duplicate_attestation_updates_replay_metrics() {
+        let env = make_env();
+        let (client, _, issuer, subject) = setup(&env);
+
+        let hash = payload(&env, 0x55);
+        client.submit_attestation(&issuer, &subject, &1_000_001u64, &hash, &sig(&env));
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.submit_attestation(&issuer, &subject, &1_000_002u64, &hash, &sig(&env));
+        }));
+
+        assert!(result.is_err(), "Duplicate attestation submission should panic");
+
+        let metrics = client.get_replay_metrics();
+        assert_eq!(metrics.total_replay_attempts, 1);
+        assert_eq!(metrics.unique_replayed_ids, 1);
+        assert_eq!(metrics.last_updated_ledger, 0);
+
+        let replayed_count = client.get_replay_count_for_id(hash.clone());
+        assert_eq!(replayed_count, 1);
+    }
+
     // -----------------------------------------------------------------------
     // Different payload hash from same issuer is accepted
     // -----------------------------------------------------------------------

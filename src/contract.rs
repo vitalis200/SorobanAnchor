@@ -10,6 +10,7 @@ use crate::errors::ErrorCode;
 use crate::rate_limiter::RateLimiter;
 use crate::sep10_jwt;
 use crate::transaction_state_tracker::{OptRecovery, TransactionState, TransactionStateRecord};
+use crate::replay_detection::{self, ReplayMetrics};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -2517,6 +2518,9 @@ impl AnchorKitContract {
         let hash_raw = xdr_to_vec(&payload_hash);
         let used_key = make_storage_key(&env, &[b"USED", &issuer_raw, &hash_raw]);
         if env.storage().persistent().has(&used_key) {
+            // Record replay detection event and metrics before panicking
+            let replay_event = replay_detection::record_replay_detection(&env, &payload_hash, &issuer);
+            replay_detection::emit_replay_detection_log(&env, &replay_event);
             panic_with_error!(&env, ErrorCode::ReplayAttack);
         }
 
@@ -2572,6 +2576,9 @@ impl AnchorKitContract {
         let hash_raw = xdr_to_vec(&payload_hash);
         let used_key = make_storage_key(&env, &[b"USED", &issuer_raw, &hash_raw]);
         if env.storage().persistent().has(&used_key) {
+            // Record replay detection event and metrics before panicking
+            let replay_event = replay_detection::record_replay_detection(&env, &payload_hash, &issuer);
+            replay_detection::emit_replay_detection_log(&env, &replay_event);
             panic_with_error!(&env, ErrorCode::ReplayAttack);
         }
 
@@ -2623,6 +2630,9 @@ impl AnchorKitContract {
         let hash_raw = xdr_to_vec(&payload_hash);
         let used_key = make_storage_key(&env, &[b"USED", &issuer_raw, &hash_raw]);
         if env.storage().persistent().has(&used_key) {
+            // Record replay detection event and metrics before panicking
+            let replay_event = replay_detection::record_replay_detection(&env, &payload_hash, &issuer);
+            replay_detection::emit_replay_detection_log(&env, &replay_event);
             panic_with_error!(&env, ErrorCode::ReplayAttack);
         }
 
@@ -3511,6 +3521,9 @@ impl AnchorKitContract {
             &env, &[b"SESSREQ", &session_id.to_be_bytes(), &hash_raw],
         );
         if env.storage().persistent().has(&sess_req_key) {
+            // Record replay detection event and metrics before panicking
+            let replay_event = replay_detection::record_replay_detection(&env, &payload_hash, &issuer);
+            replay_detection::emit_replay_detection_log(&env, &replay_event);
             panic_with_error!(&env, ErrorCode::ReplayAttack);
         }
         env.storage().persistent().set(&sess_req_key, &true);
@@ -3520,6 +3533,9 @@ impl AnchorKitContract {
         let issuer_raw = xdr_to_vec(&issuer_xdr);
         let used_key = make_storage_key(&env, &[b"USED", &issuer_raw, &hash_raw]);
         if env.storage().persistent().has(&used_key) {
+            // Record replay detection event and metrics before panicking
+            let replay_event = replay_detection::record_replay_detection(&env, &payload_hash, &issuer);
+            replay_detection::emit_replay_detection_log(&env, &replay_event);
             panic_with_error!(&env, ErrorCode::ReplayAttack);
         }
 
@@ -5833,5 +5849,17 @@ impl AnchorKitContract {
             rate_limit_window_length: config.window_length,
             checked_at: now,
         }
+    }
+
+    /// Retrieve current replay detection metrics.
+    /// Returns aggregated statistics about detected replay attacks.
+    pub fn get_replay_metrics(env: Env) -> ReplayMetrics {
+        replay_detection::get_replay_metrics(&env)
+    }
+
+    /// Retrieve the attempt count for a specific request ID that was replayed.
+    /// Returns 0 if no replay attempts have been recorded for this ID.
+    pub fn get_replay_count_for_id(env: Env, request_id: Bytes) -> u64 {
+        replay_detection::get_replay_count_for_id(&env, &request_id)
     }
 }
