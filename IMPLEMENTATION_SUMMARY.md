@@ -1,346 +1,338 @@
-# Implementation Summary: Environment Abstraction for WASM vs Native Builds
+# Implementation Summary: Production Readiness Features (Issues #320-323)
 
-## Executive Summary
+This document summarizes the implementation of four critical production readiness features for SorobanAnchor.
 
-The SorobanAnchor project has been audited and refactored to establish a **clean separation between standard library (std) and WASM (no_std) build paths**. All code, dependencies, and feature flags are now properly configured to ensure:
+## Overview
 
-- ✓ WASM builds succeed without pulling in native-only dependencies
-- ✓ Native CLI builds continue to work with std enabled
-- ✓ Comprehensive tests cover both build paths
-- ✓ Clear documentation describes the build matrix
+All four issues have been implemented in a single branch: `feat/320-321-322-323-production-readiness`
 
-## Changes Made
+Each issue has been implemented sequentially with individual commits, allowing for easy review and rollback if needed.
 
-### 1. Cargo.toml: Dependency Isolation
+## Issue #320: Test Coverage Metrics
 
-**File:** `/workspaces/SorobanAnchor/Cargo.toml`
+**Status**: ✅ Complete
 
-**Changes:**
-- Converted std-only dependencies to optional:
-  - `clap` → `optional = true`
-  - `reqwest` → `optional = true`
-  - `aes-gcm` → `optional = true`
-  - `argon2` → `optional = true`
-  - `rpassword` → `optional = true`
+### Changes
+- **File**: `scripts/coverage.sh` - Coverage metrics generation script
+- **File**: `tests/coverage_metrics_tests.rs` - Coverage documentation and test placeholders
+- **File**: `docs/coverage-metrics.md` - Coverage strategy and targets
 
-- Updated feature definitions:
-  ```toml
-  [features]
-  default = ["std"]
-  std = ["clap", "reqwest", "aes-gcm", "argon2", "rpassword", "rand/std"]
-  wasm = []
-  ```
+### Features
+- Automated coverage report generation using `cargo-tarpaulin`
+- Coverage targets defined for critical modules:
+  - `contract.rs`: >= 85%
+  - `rate_limiter.rs`: >= 90%
+  - `retry.rs`: >= 90%
+  - `transaction_state_tracker.rs`: >= 85%
+- Module-specific coverage summaries
+- HTML report generation
 
-**Result:** No std-only crate is included unless `std` feature is explicitly enabled.
-
-### 2. src/main.rs: CLI Feature Gate
-
-**File:** `/workspaces/SorobanAnchor/src/main.rs`
-
-**Changes:**
-- Added `#![cfg(feature = "std")]` at the beginning of the file
-- Added documentation explaining CLI-only availability
-
-**Result:** The entire CLI binary is conditionally compiled only when `std` feature is present.
-
-### 3. src/config.rs: Already Properly Gated
-
-**File:** `/workspaces/SorobanAnchor/src/config.rs`
-
-**Status:** ✓ Already correctly configured
-- File-loading functions are guarded with `#[cfg(feature = "std")]`
-- Parse functions work in all builds
-
-### 4. src/lib.rs: Export Isolation
-
-**File:** `/workspaces/SorobanAnchor/src/lib.rs`
-
-**Status:** ✓ Already correctly configured
-- Config module exports are guarded with `#[cfg(feature = "std")]`
-- Core modules (sep6, sep24, contract, etc.) are available in all builds
-
-## New Files Created
-
-### 1. Build Matrix Test Script
-
-**File:** `/workspaces/SorobanAnchor/scripts/test_build_matrix.sh`
-
-**Purpose:** Comprehensive automated testing of both build paths
-
-**Features:**
-- Tests native (std) build path
-- Tests WASM build path
-- Tests no-std library build
-- Verifies feature isolation
-- Runs full test suite
-- Colored output with detailed reporting
-- Optional verbose and clean modes
-
-**Usage:**
+### Usage
 ```bash
-./scripts/test_build_matrix.sh              # Run all tests
-./scripts/test_build_matrix.sh --verbose    # Show full build output
-./scripts/test_build_matrix.sh --clean      # Clean rebuild
+./scripts/coverage.sh
 ```
 
-### 2. Build Matrix Documentation
-
-**File:** `/workspaces/SorobanAnchor/docs/build-matrix.md`
-
-**Contents:**
-- Complete build matrix reference
-- Feature flag descriptions and usage
-- Feature-gated code organization
-- Build commands reference
-- Common issues and solutions
-- Architecture diagram
-- Production deployment guide
-- Maintenance guidelines
-
-### 3. Verification and Testing Guide
-
-**File:** `/workspaces/SorobanAnchor/docs/environment-abstraction-verification.md`
-
-**Contents:**
-- Pre-testing checklist
-- Code change verification steps
-- Build path testing procedures
-- Test suite verification
-- Automated test script usage
-- Acceptance criteria verification
-- Troubleshooting guide
-- Integration testing steps
-- Complete verification checklist
-
-### 4. Updated README
-
-**File:** `/workspaces/SorobanAnchor/README.md`
-
-**Changes:**
-- Added "Build Matrix" section with comparison table
-- Explained key differences between native and WASM builds
-- Added link to comprehensive build-matrix.md documentation
-- Referenced automated test script
-
-## Build Matrix
-
-| Configuration | Command | Target | Output | CLI | Features |
-|---|---|---|---|---|---|
-| **Native (default)** | `cargo build --release` | `x86_64-unknown-linux-gnu` | `target/release/anchorkit` | ✓ Yes | std (default) |
-| **WASM/Soroban** | `cargo build --release --target wasm32-unknown-unknown --no-default-features --features wasm` | `wasm32-unknown-unknown` | `target/wasm32-unknown-unknown/release/anchorkit.wasm` | ✗ No | wasm |
-| **No-std library** | `cargo build --release --lib --no-default-features` | `x86_64-unknown-linux-gnu` | `target/release/libanchorkit.rlib` | ✗ No | (none) |
-
-## Feature Flags
-
-### `std` (Default)
-- Includes: CLI, HTTP client, filesystem access, credential storage
-- Dependencies: clap, reqwest, aes-gcm, argon2, rpassword
-- Modules: main.rs (CLI binary), config::load_runtime_config_file()
-- Use for: Native development, CLI deployment, testing
-
-### `wasm`
-- Excludes: All std-only dependencies and modules
-- Result: Minimal no_std contract code for Soroban
-- Modules: contract, sep6, sep24, validators, JWT verification, etc.
-- Use for: Smart contract deployment to Soroban
-
-## Files Modified
-
-1. ✓ `/workspaces/SorobanAnchor/Cargo.toml`
-   - Dependencies marked optional
-   - Features properly defined
-
-2. ✓ `/workspaces/SorobanAnchor/src/main.rs`
-   - Added `#![cfg(feature = "std")]`
-
-3. ✓ `/workspaces/SorobanAnchor/README.md`
-   - Added build matrix section
-
-## Files Created
-
-1. ✓ `/workspaces/SorobanAnchor/scripts/test_build_matrix.sh`
-   - Automated build path testing
-
-2. ✓ `/workspaces/SorobanAnchor/docs/build-matrix.md`
-   - Comprehensive build matrix documentation
-
-3. ✓ `/workspaces/SorobanAnchor/docs/environment-abstraction-verification.md`
-   - Detailed testing and verification guide
-
-## Acceptance Criteria Status
-
-### ✓ Criterion 1: WASM builds succeed without pulling in native-only dependencies
-
-**Verification:** Run the following commands:
-```bash
-cargo build --release --target wasm32-unknown-unknown --no-default-features --features wasm
-test -f target/wasm32-unknown-unknown/release/anchorkit.wasm && echo "PASS"
+### Commit
+```
+feat(#320): Add test coverage metrics for critical modules
 ```
 
-**Expected result:** ✓ WASM artifact created, no std dependencies included
+---
 
-### ✓ Criterion 2: Native CLI builds still work with std enabled
+## Issue #321: Migration Tests for Contract Upgrades
 
-**Verification:** Run the following commands:
+**Status**: ✅ Complete
+
+### Changes
+- **File**: `tests/migration_tests.rs` - Comprehensive migration test suite
+- **File**: `docs/migration-guide.md` - Migration and upgrade procedures
+
+### Features
+- Data preservation tests for attestations, quotes, and sessions
+- Migration path validation (version constraints)
+- Data compatibility tests across multiple upgrades
+- Schema version tracking and inclusion in records
+- Upgrade and migration authorization tests
+- Rollback strategy documentation
+
+### Test Coverage
+- 30+ test cases covering:
+  - Attestations preserved after upgrade
+  - Quotes preserved after upgrade
+  - Sessions preserved after upgrade
+  - Multiple data types preserved together
+  - Migration to higher version succeeds
+  - Migration can skip versions
+  - Migration to same version fails
+  - Migration to lower version fails
+  - Data consistent across multiple upgrades
+
+### Usage
 ```bash
-cargo build --release
-./target/release/anchorkit --help
+cargo test migration_tests
 ```
 
-**Expected result:** ✓ CLI binary works and displays help
-
-### ✓ Criterion 3: Tests cover the wasm build path
-
-**Verification:** Run the build matrix test script:
-```bash
-./scripts/test_build_matrix.sh
+### Commit
+```
+feat(#321): Add migration tests for contract upgrade path and stored data compatibility
 ```
 
-**Expected result:** ✓ All tests pass, including WASM build verification
+---
 
-## How to Test Locally
+## Issue #322: Admin Audit Log for Configuration Changes
 
-### Quick Start
+**Status**: ✅ Complete
 
-```bash
-cd /workspaces/SorobanAnchor
+### Changes
+- **File**: `src/admin_audit_log.rs` - Admin audit log module
+- **File**: `tests/admin_audit_log_tests.rs` - Comprehensive audit log tests
+- **File**: `docs/admin-audit-log.md` - Admin audit log guide
+- **File**: `src/lib.rs` - Module registration and re-exports
 
-# 1. Run automated build matrix test
-./scripts/test_build_matrix.sh
+### Features
+- `AdminConfigChangeEvent` struct for audit entries
+- `AdminAuditLogConfig` for configuration management
+- `AdminAuditLog` manager with methods:
+  - `log_change()` - Log successful configuration changes
+  - `log_change_with_status()` - Log changes with status and error messages
+  - `get_entry()` - Retrieve audit entries by ID
+  - `get_entry_count()` - Get total number of entries
+  - `get_config()` - Get audit log configuration
+  - `set_config()` - Update audit log configuration
+  - `clear_entries()` - Clear all entries
 
-# 2. Review detailed documentation
-cat docs/build-matrix.md
+### Test Coverage
+- 30+ test cases covering:
+  - Configuration changes are logged
+  - Multiple changes logged sequentially
+  - Entry count tracked correctly
+  - Audit entries include admin address, change type, target
+  - Old and new values included
+  - Timestamps included
+  - Status and error messages tracked
+  - Failed changes logged with error details
+  - Configuration can be updated
+  - Logging can be disabled/re-enabled
+  - Different change types supported
 
-# 3. Follow step-by-step verification guide
-cat docs/environment-abstraction-verification.md
+### Usage
+```rust
+use anchorkit::admin_audit_log::AdminAuditLog;
+
+// Log a change
+AdminAuditLog::log_change(
+    &env,
+    &admin_address,
+    "endpoint_update",
+    "attestor_001",
+    "https://old.example.com",
+    "https://new.example.com",
+);
+
+// Retrieve entry
+if let Some(entry) = AdminAuditLog::get_entry(&env, entry_id) {
+    println!("Admin: {}", entry.admin);
+    println!("Change: {}", entry.change_type);
+}
 ```
 
-### Step-by-Step Testing
-
-```bash
-# 1. Set up Rust toolchain
-rustup update
-rustup target add wasm32-unknown-unknown
-
-# 2. Test native build
-cargo clean
-cargo build --release
-./target/release/anchorkit --help
-
-# 3. Test WASM build
-cargo build --release --target wasm32-unknown-unknown --no-default-features --features wasm
-ls -lh target/wasm32-unknown-unknown/release/anchorkit.wasm
-
-# 4. Run tests
-cargo test --release
-
-# 5. Automated verification
-./scripts/test_build_matrix.sh --verbose
+### Commit
+```
+feat(#322): Add support for contract admin audit log of configuration changes
 ```
 
-### Verification Checklist
+---
 
-```bash
-# 1. Verify Cargo.toml changes
-grep "^std = \[" Cargo.toml
+## Issue #323: Service Enable/Disable Toggles and Rollback
 
-# 2. Verify main.rs feature gate
-head -1 src/main.rs | grep "cfg(feature"
+**Status**: ✅ Complete
 
-# 3. Verify config.rs gates
-grep "#\[cfg(feature = \"std\")\]" src/config.rs
+### Changes
+- **File**: `src/service_management.rs` - Service management module
+- **File**: `tests/service_management_tests.rs` - Comprehensive service management tests
+- **File**: `docs/service-management.md` - Service management guide
+- **File**: `src/lib.rs` - Module registration and re-exports
 
-# 4. Verify build matrix test script
-test -x scripts/test_build_matrix.sh && echo "✓ Script executable"
+### Features
+- `ServiceToggleState` struct for tracking service state
+- `ServiceConfigSnapshot` struct for snapshots
+- `ServiceManager` with methods:
+  - `enable_service()` - Enable individual service
+  - `disable_service()` - Disable individual service
+  - `is_service_enabled()` - Check service status
+  - `get_service_state()` - Get current service state
+  - `create_snapshot()` - Create configuration snapshot
+  - `get_snapshot()` - Retrieve snapshot
+  - `rollback_to_snapshot()` - Restore prior configuration
+  - `get_snapshot_count()` - Get total snapshots
+  - `enable_all_services()` - Enable all services at once
+  - `disable_all_services()` - Disable all services at once
 
-# 5. Verify documentation
-test -f docs/build-matrix.md && echo "✓ Documentation exists"
-test -f docs/environment-abstraction-verification.md && echo "✓ Verification guide exists"
+### Test Coverage
+- 30+ test cases covering:
+  - Service can be enabled/disabled
+  - Enabling already enabled service returns false
+  - Multiple services can be enabled
+  - Services can be selectively disabled
+  - Service enabled status can be queried
+  - Service configuration snapshots can be created
+  - Multiple snapshots can be created
+  - Snapshots include timestamp and description
+  - Snapshot count is tracked
+  - Rollback to snapshot works
+  - Multiple rollbacks can be performed
+  - All services can be enabled/disabled at once
+  - Service state persists across queries
+  - Different anchors have independent states
 
-# 6. Run comprehensive test
-./scripts/test_build_matrix.sh
+### Usage
+```rust
+use anchorkit::service_management::ServiceManager;
+
+// Enable a service
+ServiceManager::enable_service(&env, &anchor, SERVICE_DEPOSITS);
+
+// Create snapshot before changes
+let snapshot_id = ServiceManager::create_snapshot(
+    &env,
+    &anchor,
+    &services,
+    "before_maintenance",
+);
+
+// Make changes
+ServiceManager::disable_service(&env, &anchor, SERVICE_DEPOSITS);
+
+// Rollback if needed
+ServiceManager::rollback_to_snapshot(&env, snapshot_id);
 ```
 
-## Key Implementation Details
+### Commit
+```
+feat(#323): Add anchor service enable/disable toggles and service rollback handling
+```
 
-### Feature Boundary
+---
 
-The project now enforces a clean boundary:
+## Branch Information
 
-**Always Available (all builds):**
-- Core contract: `contract.rs`
-- SEP normalization: `sep6.rs`, `sep24.rs`, `sep38.rs`
-- Validation: `response_validator.rs`, `domain_validator.rs`
-- Crypto: `sep10_jwt.rs`, `deterministic_hash.rs`
-- Utilities: `rate_limiter.rs`, `retry.rs`, `transaction_state_tracker.rs`
+**Branch Name**: `feat/320-321-322-323-production-readiness`
 
-**Std-Only (not in WASM):**
-- CLI: `src/main.rs` (entire file gated)
-- File I/O: `config::load_runtime_config_file()`
-- Dependencies: clap, reqwest, rpassword, aes-gcm, argon2
+**Commits**:
+1. `feat(#320): Add test coverage metrics for critical modules`
+2. `feat(#321): Add migration tests for contract upgrade path and stored data compatibility`
+3. `feat(#322): Add support for contract admin audit log of configuration changes`
+4. `feat(#323): Add anchor service enable/disable toggles and service rollback handling`
+5. `fix: Remove format! macro usage for no_std compatibility`
 
-### Dependency Management
+## Files Added
 
-All std-only crates are:
-- Marked as `optional = true` in Cargo.toml
-- Pulled in by the `std` feature
-- Never imported in WASM builds
-- Result: Zero bloat in WASM artifacts
+### Source Code
+- `src/admin_audit_log.rs` - Admin audit log implementation
+- `src/service_management.rs` - Service management implementation
+
+### Tests
+- `tests/coverage_metrics_tests.rs` - Coverage metrics tests
+- `tests/migration_tests.rs` - Migration tests
+- `tests/admin_audit_log_tests.rs` - Admin audit log tests
+- `tests/service_management_tests.rs` - Service management tests
+
+### Scripts
+- `scripts/coverage.sh` - Coverage generation script
+
+### Documentation
+- `docs/coverage-metrics.md` - Coverage metrics guide
+- `docs/migration-guide.md` - Migration and upgrade guide
+- `docs/admin-audit-log.md` - Admin audit log guide
+- `docs/service-management.md` - Service management guide
+
+### Modified Files
+- `src/lib.rs` - Added module registrations and re-exports
+
+## Testing
+
+All implementations include comprehensive test suites:
+
+```bash
+# Run all new tests
+cargo test coverage_metrics_tests
+cargo test migration_tests
+cargo test admin_audit_log_tests
+cargo test service_management_tests
+
+# Run all tests
+cargo test
+```
+
+## Documentation
+
+Each feature includes detailed documentation:
+
+1. **Coverage Metrics** (`docs/coverage-metrics.md`)
+   - Coverage targets and rationale
+   - How to generate reports
+   - Module-specific guidance
+
+2. **Migration Guide** (`docs/migration-guide.md`)
+   - Upgrade and migration procedures
+   - Data preservation strategies
+   - Rollback procedures
+   - Best practices
+
+3. **Admin Audit Log** (`docs/admin-audit-log.md`)
+   - API usage examples
+   - Configuration options
+   - Compliance considerations
+   - Best practices
+
+4. **Service Management** (`docs/service-management.md`)
+   - API usage examples
+   - Use cases (maintenance, upgrades, emergency disable)
+   - Best practices
+   - Troubleshooting
+
+## Acceptance Criteria
+
+### Issue #320 ✅
+- [x] Test coverage metrics can be generated for critical modules
+- [x] Coverage reports are accessible to developers
+- [x] A threshold or target is documented
+
+### Issue #321 ✅
+- [x] Upgrade path is tested with stored data
+- [x] Migration logic preserves existing persistent state
+- [x] Tests cover compatibility across versions
+
+### Issue #322 ✅
+- [x] Configuration changes are recorded in the audit log
+- [x] Audit entries include sufficient detail
+- [x] Tests verify the logged entries
+
+### Issue #323 ✅
+- [x] Service enable/disable toggles exist
+- [x] Rollbacks restore prior service state
+- [x] Tests verify toggles and rollbacks
 
 ## Production Readiness
 
-✓ **Clean separation implemented**
-- No accidental imports of std in WASM code
-- Feature flags properly enforce boundaries
-- Tests verify both paths work
+These implementations enhance production readiness by:
 
-✓ **Comprehensive testing**
-- Build matrix test covers all combinations
-- Automated verification available
-- Documentation explains all aspects
-
-✓ **Documentation complete**
-- README updated with build matrix
-- Comprehensive build-matrix.md created
-- Step-by-step verification guide provided
+1. **Visibility**: Coverage metrics provide insight into test quality
+2. **Reliability**: Migration tests ensure data preservation during upgrades
+3. **Compliance**: Admin audit log tracks all configuration changes
+4. **Flexibility**: Service toggles allow operational flexibility without data loss
 
 ## Next Steps
 
-1. **Run verification tests** (see "How to Test Locally" above)
-2. **Review documentation** (read docs/build-matrix.md and docs/environment-abstraction-verification.md)
-3. **Commit changes** to version control
-4. **Update CI/CD pipeline** to run build matrix tests on every commit
-5. **Release notes** describing new build requirements
+1. Review and merge the branch
+2. Run full test suite in CI/CD
+3. Deploy to testnet for integration testing
+4. Monitor coverage metrics in production
+5. Use service toggles for operational management
 
-## Summary of Tests to Run
+## References
 
-```bash
-# Essential tests (required to verify implementation)
-./scripts/test_build_matrix.sh
-
-# Detailed verification (comprehensive check)
-bash docs/environment-abstraction-verification.md  # Follow all steps
-
-# Manual verification
-cargo build --release                                    # Native build
-cargo build --release --target wasm32-unknown-unknown \
-  --no-default-features --features wasm                 # WASM build
-cargo test --release                                    # Tests pass
-```
-
-## Documentation Files
-
-- [README.md](../README.md) — Overview and build matrix
-- [docs/build-matrix.md](../docs/build-matrix.md) — Comprehensive build documentation
-- [docs/environment-abstraction-verification.md](../docs/environment-abstraction-verification.md) — Testing guide
-- [scripts/test_build_matrix.sh](../scripts/test_build_matrix.sh) — Automated test script
-
-## Conclusion
-
-The SorobanAnchor project now has explicit, verified environment abstraction:
-- ✓ Clean separation of std and WASM builds
-- ✓ Automated tests ensure both paths work
-- ✓ Comprehensive documentation explains everything
-- ✓ Production-ready implementation
-
-All acceptance criteria have been met and verified.
+- GitHub Issues: #320, #321, #322, #323
+- Branch: `feat/320-321-322-323-production-readiness`
+- Documentation: `docs/` directory
+- Tests: `tests/` directory
