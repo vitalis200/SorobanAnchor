@@ -128,6 +128,7 @@ pub mod retry;
 pub mod transaction_state_tracker;
 pub mod contract;
 pub mod admin_audit_log;
+pub mod service_management;
 
 // ── std-only modules (filesystem, runtime config) ─────────────────────────────
 #[cfg(feature = "std")]
@@ -167,6 +168,7 @@ pub use contract::{AnchorKitContract, EndpointUpdated, CacheConfig};
 pub use transaction_state_tracker::{TransactionState, TransactionStateRecord, RecoveryMetadata, OptRecovery};
 pub use transaction_state_tracker::{StorageBudgetMonitor, TransactionStateTracker};
 pub use admin_audit_log::{AdminAuditLog, AdminConfigChangeEvent, AdminAuditLogConfig};
+pub use service_management::{ServiceManager, ServiceToggleState, ServiceConfigSnapshot};
 
 // ── std-only re-exports ───────────────────────────────────────────────────────
 #[cfg(feature = "std")]
