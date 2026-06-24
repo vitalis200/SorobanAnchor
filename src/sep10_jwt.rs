@@ -258,7 +258,8 @@ fn parse_json_sub(env: &Env, payload: &[u8]) -> Result<String, ()> {
 ///
 /// Clock skew tolerance (seconds) is read from the `"JWTSKEW"` instance key; defaults to
 /// [`DEFAULT_CLOCK_SKEW`] (60 s). A token whose `exp` is within the skew window of `now` is
-/// still accepted. If `exp - iat` exceeds [`MAX_JWT_LIFETIME`] (86 400 s) the token is rejected.
+/// still accepted. The `iat` claim is required; if `exp - iat` exceeds
+/// [`MAX_JWT_LIFETIME`] (86 400 s) the token is rejected.
 ///
 /// When `expected_sub` is [`None`], the token must still contain a parseable `sub` claim, but it
 /// is not compared to a caller-supplied address (see contract `verify_sep10_token`).
@@ -355,11 +356,10 @@ pub fn verify_sep10_jwt(
         return Err(());
     }
 
-    // Enforce maximum token lifetime: exp - iat must not exceed 24 hours
-    if let Some(iat) = parse_json_iat(&payload_dec) {
-        if exp.saturating_sub(iat) > MAX_JWT_LIFETIME {
-            return Err(());
-        }
+    // Enforce maximum token lifetime: exp - iat must not exceed 24 hours.
+    let iat = parse_json_iat(&payload_dec).ok_or(())?;
+    if exp.saturating_sub(iat) > MAX_JWT_LIFETIME {
+        return Err(());
     }
 
     // Issue #61: reject tokens whose nbf is in the future
@@ -405,8 +405,8 @@ mod tests {
     extern crate std;
 
     use super::*;
-    use std::string::ToString;
     use std::format;
+    use std::string::ToString;
     use ed25519_dalek::{Signer, SigningKey};
     use rand::rngs::OsRng;
     use soroban_sdk::testutils::{Address as _, Ledger, LedgerInfo};
@@ -432,7 +432,26 @@ mod tests {
     fn build_jwt(signing_key: &SigningKey, sub: &str, exp: u64) -> std::string::String {
         use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
         let header = r#"{"alg":"EdDSA","typ":"JWT"}"#;
-        let payload = format!(r#"{{"sub":"{}","exp":{},"iss":"https://anchor.example.com"}}"#, sub, exp);
+        let iat = exp.saturating_sub(MAX_JWT_LIFETIME);
+        let payload = format!(
+            r#"{{"sub":"{}","iat":{},"exp":{},"iss":"https://anchor.example.com"}}"#,
+            sub, iat, exp
+        );
+        let header_b64 = URL_SAFE_NO_PAD.encode(header);
+        let payload_b64 = URL_SAFE_NO_PAD.encode(payload);
+        let signing_input = format!("{}.{}", header_b64, payload_b64);
+        let sig = signing_key.sign(signing_input.as_bytes());
+        let sig_b64 = URL_SAFE_NO_PAD.encode(sig.to_bytes());
+        format!("{}.{}", signing_input, sig_b64)
+    }
+
+    fn build_jwt_without_iat(signing_key: &SigningKey, sub: &str, exp: u64) -> std::string::String {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+        let header = r#"{"alg":"EdDSA","typ":"JWT"}"#;
+        let payload = format!(
+            r#"{{"sub":"{}","exp":{},"iss":"https://anchor.example.com"}}"#,
+            sub, exp
+        );
         let header_b64 = URL_SAFE_NO_PAD.encode(header);
         let payload_b64 = URL_SAFE_NO_PAD.encode(payload);
         let signing_input = format!("{}.{}", header_b64, payload_b64);
@@ -450,7 +469,11 @@ mod tests {
     ) -> std::string::String {
         use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
         let header = r#"{"alg":"EdDSA","typ":"JWT"}"#;
-        let mut payload = format!(r#"{{"sub":"{}","exp":{},"iss":"https://anchor.example.com""#, sub, exp);
+        let iat = exp.saturating_sub(MAX_JWT_LIFETIME);
+        let mut payload = format!(
+            r#"{{"sub":"{}","iat":{},"exp":{},"iss":"https://anchor.example.com""#,
+            sub, iat, exp
+        );
         if let Some(n) = nbf {
             payload.push_str(&format!(r#","nbf":{}"#, n));
         }
@@ -466,10 +489,19 @@ mod tests {
         format!("{}.{}", signing_input, sig_b64)
     }
 
-    fn build_jwt_with_alg(signing_key: &SigningKey, alg: &str, sub: &str, exp: u64) -> std::string::String {
+    fn build_jwt_with_alg(
+        signing_key: &SigningKey,
+        alg: &str,
+        sub: &str,
+        exp: u64,
+    ) -> std::string::String {
         use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
         let header = format!(r#"{{"alg":"{}","typ":"JWT"}}"#, alg);
-        let payload = format!(r#"{{"sub":"{}","exp":{},"iss":"https://anchor.example.com"}}"#, sub, exp);
+        let iat = exp.saturating_sub(MAX_JWT_LIFETIME);
+        let payload = format!(
+            r#"{{"sub":"{}","iat":{},"exp":{},"iss":"https://anchor.example.com"}}"#,
+            sub, iat, exp
+        );
         let header_b64 = URL_SAFE_NO_PAD.encode(header);
         let payload_b64 = URL_SAFE_NO_PAD.encode(payload);
         let signing_input = format!("{}.{}", header_b64, payload_b64);
@@ -481,7 +513,8 @@ mod tests {
     fn build_jwt_no_iss(signing_key: &SigningKey, sub: &str, exp: u64) -> std::string::String {
         use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
         let header = r#"{"alg":"EdDSA","typ":"JWT"}"#;
-        let payload = format!(r#"{{"sub":"{}","exp":{}}}"#, sub, exp);
+        let iat = exp.saturating_sub(MAX_JWT_LIFETIME);
+        let payload = format!(r#"{{"sub":"{}","iat":{},"exp":{}}}"#, sub, iat, exp);
         let header_b64 = URL_SAFE_NO_PAD.encode(header);
         let payload_b64 = URL_SAFE_NO_PAD.encode(payload);
         let signing_input = format!("{}.{}", header_b64, payload_b64);
@@ -513,6 +546,25 @@ mod tests {
         env.as_contract(&contract_id, || {
             assert!(verify_sep10_jwt(&env, &token, &pk, Some(&sub)).is_ok());
             assert!(verify_sep10_jwt(&env, &token, &pk, None).is_ok());
+        });
+    }
+
+    #[test]
+    fn verify_rejects_missing_iat_even_with_future_exp() {
+        let env = Env::default();
+        ledger(&env, 1_000);
+        let contract_id = make_contract_id(&env);
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let pk = Bytes::from_slice(&env, signing_key.verifying_key().as_bytes());
+
+        let attestor = Address::generate(&env);
+        let sub = attestor.to_string();
+        let sub_str: std::string::String = sub.to_string();
+        let jwt = build_jwt_without_iat(&signing_key, sub_str.as_str(), 99_999_999_999);
+        let token = String::from_str(&env, jwt.as_str());
+
+        env.as_contract(&contract_id, || {
+            assert!(verify_sep10_jwt(&env, &token, &pk, Some(&sub)).is_err());
         });
     }
 

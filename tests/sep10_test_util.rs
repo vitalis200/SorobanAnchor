@@ -2,15 +2,16 @@
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use ed25519_dalek::{Signer, SigningKey};
-use soroban_sdk::{Address, Bytes, BytesN, Env, String};
+use soroban_sdk::{Address, Bytes, Env, String};
 
 use anchorkit::contract::AnchorKitContractClient;
 
 pub fn build_sep10_jwt(signing_key: &SigningKey, sub: &str, exp: u64) -> std::string::String {
     let header = r#"{"alg":"EdDSA","typ":"JWT"}"#;
+    let iat = exp.saturating_sub(anchorkit::sep10_jwt::MAX_JWT_LIFETIME);
     let payload = format!(
-        r#"{{"sub":"{}","exp":{},"iss":"https://anchor.example.com"}}"#,
-        sub, exp
+        r#"{{"sub":"{}","iat":{},"exp":{},"iss":"https://anchor.example.com"}}"#,
+        sub, iat, exp
     );
     let header_b64 = URL_SAFE_NO_PAD.encode(header);
     let payload_b64 = URL_SAFE_NO_PAD.encode(payload);
