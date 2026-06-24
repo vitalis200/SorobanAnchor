@@ -993,10 +993,15 @@ fn current_kyc_status(env: &Env, record: &KycRecord) -> KycStatus {
     }
 }
 
-fn validate_kyc_transition(current: KycStatus, next: KycStatus, _record: &KycRecord, _now: u64) -> bool {
+fn validate_kyc_transition(current: KycStatus, next: KycStatus, record: &KycRecord, now: u64) -> bool {
+    if next == KycStatus::Pending && now.saturating_sub(record.submitted_at) < 86400 {
+        return false;
+    }
+
     match (current, next) {
         (KycStatus::NotSubmitted, KycStatus::Pending) => true,
         (KycStatus::Expired, KycStatus::Pending) => true,
+        (KycStatus::Rejected, KycStatus::Pending) => true,
         (KycStatus::Pending, KycStatus::Approved) => true,
         (KycStatus::Pending, KycStatus::Rejected) => true,
         _ => false,
