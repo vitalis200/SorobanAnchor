@@ -12,7 +12,7 @@ mod routing_tests {
     use ed25519_dalek::SigningKey;
     use rand::rngs::OsRng;
 
-    use anchorkit::contract::{AnchorKitContract, AnchorKitContractClient, RoutingOptions, RoutingRequest};
+    use anchorkit::contract::{AnchorKitContract, AnchorKitContractClient, RoutingOptions, RoutingRequest, WeightedRoutingStrategy};
     use crate::sep10_test_util::register_attestor_with_sep10;
 
     fn make_env() -> Env {
@@ -344,6 +344,28 @@ mod routing_tests {
     // -----------------------------------------------------------------------
 
     #[test]
+    fn test_weighted_strategy_accepts_small_float_drift() {
+        let strategy = WeightedRoutingStrategy {
+            fee_weight: 0.3333_f32,
+            speed_weight: 0.3333_f32,
+            reputation_weight: 0.3333_f32,
+        };
+
+        assert!(strategy.validate());
+    }
+
+    #[test]
+    fn test_weighted_strategy_rejects_large_float_drift() {
+        let strategy = WeightedRoutingStrategy {
+            fee_weight: 0.34_f32,
+            speed_weight: 0.34_f32,
+            reputation_weight: 0.34_f32,
+        };
+
+        assert!(!strategy.validate());
+    }
+
+    #[test]
     fn test_weighted_equal_weights_balanced_ranking() {
         let env = make_env();
         set_ledger(&env, 1_000_000);
@@ -615,4 +637,3 @@ mod routing_tests {
         assert_eq!(results.get(0).unwrap().anchor, with_quotes);
     }
 }
-

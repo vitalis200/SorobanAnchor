@@ -304,11 +304,13 @@ pub struct WeightedRoutingStrategy {
     pub reputation_weight: f32,
 }
 
+const WEIGHT_SUM_TOLERANCE: f32 = 0.01_f32;
+
 impl WeightedRoutingStrategy {
     /// Validate that weights sum to 1.0 (within floating-point tolerance).
     pub fn validate(&self) -> bool {
         let sum = self.fee_weight + self.speed_weight + self.reputation_weight;
-        (sum - 1.0_f32).abs() < 1e-4
+        (sum - 1.0_f32).abs() < WEIGHT_SUM_TOLERANCE
     }
 
     /// Compute a normalized composite score in [0.0, 1.0].
@@ -5029,6 +5031,14 @@ impl AnchorKitContract {
         max_results: u32,
         min_reputation: u32,
     ) -> Vec<Quote> {
+        if fee_weight
+            .checked_add(speed_weight)
+            .and_then(|sum| sum.checked_add(reputation_weight))
+            != Some(1000)
+        {
+            panic_with_error!(&env, ErrorCode::InvalidWeights);
+        }
+
         let fw = fee_weight as f32 / 1000.0_f32;
         let sw = speed_weight as f32 / 1000.0_f32;
         let rw = reputation_weight as f32 / 1000.0_f32;
@@ -5038,7 +5048,7 @@ impl AnchorKitContract {
             reputation_weight: rw,
         };
         if !strategy.validate() {
-            panic_with_error!(&env, ErrorCode::ValidationError);
+            panic_with_error!(&env, ErrorCode::InvalidWeights);
         }
 
         let now = env.ledger().timestamp();
