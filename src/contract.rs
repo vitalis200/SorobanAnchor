@@ -4911,7 +4911,7 @@ impl AnchorKitContract {
 
             // Filter by amount limits
             if options.request.amount < quote.minimum_amount
-                || options.request.amount > quote.maximum_amount
+                || (quote.maximum_amount != 0 && options.request.amount > quote.maximum_amount)
             {
                 continue;
             }
