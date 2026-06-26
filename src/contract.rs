@@ -805,6 +805,33 @@ pub struct AnchorProofRecord {
 /// stored data to detect version skew.
 pub const SCHEMA_V1: u32 = 1;
 
+// ---------------------------------------------------------------------------
+// Supported SEP versions (#353)
+// ---------------------------------------------------------------------------
+
+/// SEP-6: Non-interactive deposit and withdrawal
+pub const SEP_6: u32 = 6;
+/// SEP-10: Stellar Web Authentication (JWT)
+pub const SEP_10: u32 = 10;
+/// SEP-24: Interactive deposit and withdrawal
+pub const SEP_24: u32 = 24;
+/// SEP-38: Anchor Request for Quote (RFQ)
+pub const SEP_38: u32 = 38;
+
+/// Feature flags indicating which SEP capabilities this contract supports.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct SepFeatureFlags {
+    /// SEP-6 non-interactive deposit/withdrawal support.
+    pub sep6: bool,
+    /// SEP-10 JWT authentication support.
+    pub sep10: bool,
+    /// SEP-24 interactive deposit/withdrawal support.
+    pub sep24: bool,
+    /// SEP-38 RFQ / firm quote support.
+    pub sep38: bool,
+}
+
 /// Aggregated transaction counts returned by
 /// [`AnchorKitContract::summarize_transactions_by_status`].
 #[contracttype]
@@ -6275,5 +6302,61 @@ impl AnchorKitContract {
     /// Returns 0 if no replay attempts have been recorded for this ID.
     pub fn get_replay_count_for_id(env: Env, request_id: Bytes) -> u64 {
         replay_detection::get_replay_count_for_id(&env, &request_id)
+    }
+
+    // -----------------------------------------------------------------------
+    // SEP version & feature flag introspection (#353)
+    // -----------------------------------------------------------------------
+
+    /// Return the list of SEP version numbers explicitly supported by this contract.
+    ///
+    /// # Returns
+    ///
+    /// A [`Vec<u32>`] containing the SEP numbers: `[6, 10, 24, 38]`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use soroban_sdk::Env;
+    /// use anchorkit::contract::{AnchorKitContract, SEP_6, SEP_10, SEP_24, SEP_38};
+    ///
+    /// let env = Env::default();
+    /// let seps = AnchorKitContract::supported_seps(env);
+    /// assert!(seps.contains(&SEP_6));
+    /// ```
+    pub fn supported_seps(env: Env) -> Vec<u32> {
+        let mut v = Vec::new(&env);
+        v.push_back(SEP_6);
+        v.push_back(SEP_10);
+        v.push_back(SEP_24);
+        v.push_back(SEP_38);
+        v
+    }
+
+    /// Return a [`SepFeatureFlags`] struct indicating which SEP capabilities
+    /// this contract supports.
+    ///
+    /// # Returns
+    ///
+    /// A [`SepFeatureFlags`] with all current support flags set.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use soroban_sdk::Env;
+    /// use anchorkit::contract::AnchorKitContract;
+    ///
+    /// let env = Env::default();
+    /// let flags = AnchorKitContract::supported_sep_feature_flags(env);
+    /// assert!(flags.sep10);
+    /// ```
+    pub fn supported_sep_feature_flags(env: Env) -> SepFeatureFlags {
+        let _ = env;
+        SepFeatureFlags {
+            sep6: true,
+            sep10: true,
+            sep24: true,
+            sep38: true,
+        }
     }
 }
