@@ -317,6 +317,78 @@ mod anchor_info_discovery_tests {
         assert_eq!(info.deposit_fee_percent, 0);
     }
 
+    /// Regression test for #409: validate_currency_code must accept asset codes whose
+    /// length is not a multiple of 4 (e.g. "XLM" = 3 chars, "BTC" = 3 chars, "AB" = 2
+    /// chars).  The old implementation iterated over XDR-encoded bytes including
+    /// alignment padding zeros, causing these codes to fail with InvalidAssetCode.
+    #[test]
+    fn test_short_asset_codes_accepted() {
+        let env = make_env();
+        set_ledger(&env, 0);
+        let (client, anchor) = setup(&env);
+
+        // 3-char code: XDR pads to 8 bytes (4-byte length + 3 data + 1 padding zero).
+        // The old byte-loop read that trailing zero and rejected it as non-alphanumeric.
+        let xlm_asset = AssetInfo {
+            code: String::from_str(&env, "XLM"),
+            issuer: String::from_str(&env, "native"),
+            deposit_enabled: true,
+            withdrawal_enabled: true,
+            deposit_fee_fixed: 0,
+            deposit_fee_percent: 0,
+            withdrawal_fee_fixed: 0,
+            withdrawal_fee_percent: 0,
+            deposit_min_amount: 100,
+            deposit_max_amount: 10_000_000,
+            withdrawal_min_amount: 100,
+            withdrawal_max_amount: 10_000_000,
+        };
+        // Must not panic — if it does, the XDR-padding bug has regressed.
+        client.fetch_anchor_info(&anchor, &make_toml_with_asset(&env, xlm_asset), &3600u64);
+        let info = client.get_anchor_asset_info(&anchor, &String::from_str(&env, "XLM"));
+        assert_eq!(info.issuer, String::from_str(&env, "native"));
+
+        // 2-char code: XDR pads to 8 bytes (4-byte length + 2 data + 2 padding zeros).
+        let (client2, anchor2) = setup(&env);
+        let ab_asset = AssetInfo {
+            code: String::from_str(&env, "AB"),
+            issuer: String::from_str(&env, "GABC123"),
+            deposit_enabled: true,
+            withdrawal_enabled: false,
+            deposit_fee_fixed: 10,
+            deposit_fee_percent: 0,
+            withdrawal_fee_fixed: 0,
+            withdrawal_fee_percent: 0,
+            deposit_min_amount: 50,
+            deposit_max_amount: 5_000,
+            withdrawal_min_amount: 0,
+            withdrawal_max_amount: 0,
+        };
+        client2.fetch_anchor_info(&anchor2, &make_toml_with_asset(&env, ab_asset), &3600u64);
+        let info2 = client2.get_anchor_asset_info(&anchor2, &String::from_str(&env, "AB"));
+        assert_eq!(info2.deposit_fee_fixed, 10);
+
+        // 1-char code: minimum allowed length.
+        let (client3, anchor3) = setup(&env);
+        let a_asset = AssetInfo {
+            code: String::from_str(&env, "A"),
+            issuer: String::from_str(&env, "GTEST"),
+            deposit_enabled: false,
+            withdrawal_enabled: true,
+            deposit_fee_fixed: 0,
+            deposit_fee_percent: 0,
+            withdrawal_fee_fixed: 5,
+            withdrawal_fee_percent: 0,
+            deposit_min_amount: 0,
+            deposit_max_amount: 0,
+            withdrawal_min_amount: 10,
+            withdrawal_max_amount: 10_000,
+        };
+        client3.fetch_anchor_info(&anchor3, &make_toml_with_asset(&env, a_asset), &3600u64);
+        let info3 = client3.get_anchor_asset_info(&anchor3, &String::from_str(&env, "A"));
+        assert_eq!(info3.withdrawal_fee_fixed, 5);
+    }
+
     #[test]
     fn test_multiple_anchors() {
         let env = make_env();
