@@ -3890,6 +3890,12 @@ impl AnchorKitContract {
             .persistent()
             .get(&sess_key)
             .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::SessionNotFound));
+        // #447: only the address that created the session may close it.
+        // `initiator.require_auth()` alone proves the *supplied* address signed,
+        // not that it owns this session, so verify ownership explicitly.
+        if initiator != session.initiator {
+            panic_with_error!(&env, ErrorCode::UnauthorizedAttestor);
+        }
         Self::validate_session(&env, &session);
         session.closed = true;
         env.storage().persistent().set(&sess_key, &session);
