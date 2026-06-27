@@ -75,7 +75,9 @@ impl TransactionStatus {
             "pending_external" => Self::PendingExternal,
             "pending_anchor" => Self::PendingAnchor,
             "pending_trust" => Self::PendingTrust,
-            "pending_user" | "pending_user_transfer_start" => Self::PendingUser,
+            "pending_user"
+            | "pending_user_transfer_start"
+            | "pending_user_transfer_complete" => Self::PendingUser,
             "completed" => Self::Completed,
             "refunded" => Self::Refunded,
             "expired" => Self::Expired,

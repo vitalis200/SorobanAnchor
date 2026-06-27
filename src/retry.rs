@@ -193,8 +193,13 @@ impl JitterSource for MockJitterSource {
 
 /// Classify whether an error code is retryable.
 ///
-/// Retryable: transient network/server errors (availability, rate limits, stale data).
-/// Non-retryable: auth failures, bad input, protocol violations.
+/// Retryable: transient network/server errors (availability, stale data).
+/// Non-retryable: auth failures, bad input, protocol violations, rate limits.
+///
+/// `RateLimitExceeded` is intentionally NOT retryable: retrying immediately (or
+/// with a backoff shorter than the rate window) reproduces the same error and
+/// wastes all attempts. Callers that want to respect a rate limit should
+/// implement their own wait-and-retry loop keyed to the window length.
 pub fn is_retryable(code: crate::errors::ErrorCode) -> bool {
     use crate::errors::ErrorCode;
     match code {
@@ -203,8 +208,7 @@ pub fn is_retryable(code: crate::errors::ErrorCode) -> bool {
         | ErrorCode::StaleQuote
         | ErrorCode::NoQuotesAvailable
         | ErrorCode::CacheExpired
-        | ErrorCode::CacheNotFound
-        | ErrorCode::RateLimitExceeded => true,
+        | ErrorCode::CacheNotFound => true,
         _ => false,
     }
 }
@@ -270,6 +274,15 @@ where
     S: FnMut(u64),
     J: JitterSource,
 {
+    // Guard against `max_attempts == 0`: the loop below would never execute,
+    // leaving `last_err` as `None` and hitting the `unreachable!()` at the end
+    // (a panic in debug, UB-adjacent in release). Treat 0 as a single attempt
+    // so the operation still runs exactly once and its result is returned.
+    debug_assert!(config.max_attempts >= 1, "max_attempts must be at least 1");
+    if config.max_attempts == 0 {
+        return f(0);
+    }
+
     let mut last_err: Option<E> = None;
 
     for attempt in 0..config.max_attempts {
