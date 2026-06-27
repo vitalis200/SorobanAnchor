@@ -446,5 +446,105 @@ mod capability_detection_tests {
         assert_eq!(record2.services.get(1).unwrap(), SERVICE_WITHDRAWALS);
         assert_eq!(record2.services.get(2).unwrap(), SERVICE_KYC);
     }
+
+    // -----------------------------------------------------------------------
+    // configure_services_versioned — service-code validation (#ticket)
+    //
+    // These tests exercise the versioned entry-point directly so that any
+    // future divergence in the validation path between configure_services and
+    // configure_services_versioned is caught immediately.
+    // -----------------------------------------------------------------------
+
+    /// Service code 0 is reserved / invalid and must be rejected with
+    /// `InvalidServiceType` regardless of which entry-point is used.
+    #[test]
+    fn test_configure_services_versioned_rejects_zero_code() {
+        let env = make_env();
+        let (client, _) = setup(&env);
+        let anchor = Address::generate(&env);
+        let sk = SigningKey::generate(&mut OsRng);
+        register_attestor_with_sep10(&env, &client, &anchor, &anchor, &sk);
+
+        let empty_retirements: Vec<ServiceRetirementInfo> = Vec::new(&env);
+        let result = client.try_configure_services_versioned(
+            &anchor,
+            &services(&env, &[0u32]),
+            &empty_retirements,
+            &SERVICE_CAPABILITY_VERSION,
+        );
+        assert!(result.is_err(), "service code 0 must be rejected");
+    }
+
+    /// Any service code above MAX_KNOWN_SERVICE_CODE (currently 4) must be
+    /// rejected with `InvalidServiceType`.
+    #[test]
+    fn test_configure_services_versioned_rejects_unknown_code() {
+        let env = make_env();
+        let (client, _) = setup(&env);
+        let anchor = Address::generate(&env);
+        let sk = SigningKey::generate(&mut OsRng);
+        register_attestor_with_sep10(&env, &client, &anchor, &anchor, &sk);
+
+        let empty_retirements: Vec<ServiceRetirementInfo> = Vec::new(&env);
+
+        // Code 99 is well outside the known range.
+        let result = client.try_configure_services_versioned(
+            &anchor,
+            &services(&env, &[99u32]),
+            &empty_retirements,
+            &SERVICE_CAPABILITY_VERSION,
+        );
+        assert!(result.is_err(), "service code 99 must be rejected");
+
+        // A mix of a known code and an unknown code must also be rejected
+        // wholesale — partial acceptance would silently drop the unknown entry.
+        let result2 = client.try_configure_services_versioned(
+            &anchor,
+            &services(&env, &[SERVICE_DEPOSITS, 99u32]),
+            &empty_retirements,
+            &SERVICE_CAPABILITY_VERSION,
+        );
+        assert!(result2.is_err(), "mixed known/unknown codes must be rejected");
+    }
+
+    /// Duplicate service codes within a single call must be rejected so that
+    /// the stored set is always a true set (no repeated entries).
+    #[test]
+    fn test_configure_services_versioned_rejects_duplicate_codes() {
+        let env = make_env();
+        let (client, _) = setup(&env);
+        let anchor = Address::generate(&env);
+        let sk = SigningKey::generate(&mut OsRng);
+        register_attestor_with_sep10(&env, &client, &anchor, &anchor, &sk);
+
+        let empty_retirements: Vec<ServiceRetirementInfo> = Vec::new(&env);
+        let result = client.try_configure_services_versioned(
+            &anchor,
+            &services(&env, &[SERVICE_DEPOSITS, SERVICE_DEPOSITS]),
+            &empty_retirements,
+            &SERVICE_CAPABILITY_VERSION,
+        );
+        assert!(result.is_err(), "duplicate service codes must be rejected");
+    }
+
+    /// An empty service list must be rejected — configuring zero services is
+    /// meaningless and likely a caller error.
+    #[test]
+    fn test_configure_services_versioned_rejects_empty_list() {
+        let env = make_env();
+        let (client, _) = setup(&env);
+        let anchor = Address::generate(&env);
+        let sk = SigningKey::generate(&mut OsRng);
+        register_attestor_with_sep10(&env, &client, &anchor, &anchor, &sk);
+
+        let empty_retirements: Vec<ServiceRetirementInfo> = Vec::new(&env);
+        let result = client.try_configure_services_versioned(
+            &anchor,
+            &services(&env, &[]),
+            &empty_retirements,
+            &SERVICE_CAPABILITY_VERSION,
+        );
+        assert!(result.is_err(), "empty service list must be rejected");
+    }
 }
 

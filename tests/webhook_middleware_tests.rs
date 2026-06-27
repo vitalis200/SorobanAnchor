@@ -71,7 +71,10 @@ mod webhook_middleware_tests {
 
         assert!(result.is_ok(), "expected success on 3rd attempt, got {:?}", result);
         assert_eq!(*call_count.lock().unwrap(), 3);
-        assert!(dlq.is_empty(), "DLQ must be empty when delivery eventually succeeds");
+        assert!(
+            dlq.is_empty(),
+            "DLQ must be empty when delivery eventually succeeds"
+        );
     }
 
     // -----------------------------------------------------------------------

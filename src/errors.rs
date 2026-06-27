@@ -77,6 +77,8 @@ pub enum ErrorCode {
     // Item not found errors (specific variants — replaces reuse of AttestationNotFound)
     SessionNotFound           = 32,
     QuoteNotFound             = 33,
+    AuditLogNotFound          = 34,
+    TransactionNotFound       = 35,
 
     // KYC / webhook / state errors (20–29)
     KycPending                = 20,
@@ -180,8 +182,8 @@ impl ErrorCode {
             ErrorCode::InvalidSessionMetadata    => "Session metadata is invalid",
             ErrorCode::InvalidAssetCode          => "Asset code is invalid",
             ErrorCode::QuoteNotFound             => "Quote not found",
-            ErrorCode::EndpointNotSet            => "Attestor endpoint URL has not been set",
-            ErrorCode::WebhookUrlNotSet          => "Attestor webhook URL has not been set",
+            ErrorCode::AuditLogNotFound          => "Audit log not found",
+            ErrorCode::TransactionNotFound       => "Transaction record not found",
         }
     }
 }

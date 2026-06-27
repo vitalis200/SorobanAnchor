@@ -9,6 +9,7 @@ use clap::{Parser, Subcommand};
 use serde::Serialize;
 use std::io::Read;
 use anchorkit::normalize_stellar_account_id;
+use anchorkit::config::secure_read_config_file;
 
 // ── SecretKey wrapper ─────────────────────────────────────────────────────────
 //
@@ -228,37 +229,7 @@ fn dirs_home() -> std::path::PathBuf {
 }
 
 fn secure_read_file(path: &str) -> Result<String, std::io::Error> {
-    let path_buf = std::path::Path::new(path);
-    // Ensure the file exists
-    if !path_buf.exists() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            format!("file does not exist: {path}"),
-        ));
-    }
-    // Reject symlinks to avoid symlink attacks
-    if let Ok(metadata) = path_buf.metadata() {
-        if metadata.file_type().is_symlink() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("symlink file is not allowed: {path}"),
-            ));
-        }
-    }
-    // Ensure it's a regular file
-    if let Ok(metadata) = path_buf.metadata() {
-        if !metadata.file_type().is_file() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("not a regular file: {path}"),
-            ));
-        }
-    }
-    // Open for reading (checks readability)
-    let mut file = std::fs::File::open(path_buf)?;
-    let mut contents = String::new();
-    file.read_to_string(&mut contents)?;
-    Ok(contents)
+    secure_read_config_file(std::path::Path::new(path))
 }
 
 fn load_network_profiles() -> Vec<NetworkProfile> {

@@ -98,7 +98,7 @@ where
     let last_error_msg: RefCell<String> = RefCell::new(String::new());
     let last_status: RefCell<u16> = RefCell::new(0);
 
-    let mut jitter_source = crate::retry::MockJitterSource::new(vec![0]);
+    let mut jitter_source = crate::retry::LedgerJitterSource::new(0, now_fn());
     let result = retry_with_backoff(
         &retry_cfg,
         |attempt| {

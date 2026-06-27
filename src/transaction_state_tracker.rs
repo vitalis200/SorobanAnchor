@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 use soroban_sdk::{contracttype, symbol_short, Address, Env, String, Vec};
 
 /// Default TTL: ~90 days at 5 s/ledger.

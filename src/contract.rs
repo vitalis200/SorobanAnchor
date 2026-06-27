@@ -3,6 +3,8 @@ use soroban_sdk::{
     xdr::ToXdr, Bytes, BytesN, Env, String, Symbol, Vec,
 };
 extern crate alloc;
+use alloc::string::String as RustString;
+use alloc::vec::Vec as RustVec;
 
 use crate::deterministic_hash::{compute_payload_hash, make_storage_key, verify_payload_hash};
 use crate::errors::ErrorCode;
@@ -306,8 +308,11 @@ pub struct WeightedRoutingStrategy {
 const WEIGHT_SUM_TOLERANCE: f32 = 0.01_f32;
 
 impl WeightedRoutingStrategy {
-    /// Validate that weights sum to 1.0 (within floating-point tolerance).
+    /// Validate that weights sum to 1.0 (within floating-point tolerance) and are non-negative.
     pub fn validate(&self) -> bool {
+        if self.fee_weight < 0.0 || self.speed_weight < 0.0 || self.reputation_weight < 0.0 {
+            return false;
+        }
         let sum = self.fee_weight + self.speed_weight + self.reputation_weight;
         (sum - 1.0_f32).abs() < WEIGHT_SUM_TOLERANCE
     }
@@ -1238,7 +1243,7 @@ impl AnchorKitContract {
     /// use anchorkit::AnchorKitContract;
     ///
     /// let env = Env::default();
-    /// let admin = Address::random(&env);
+    /// let admin = Address::generate(&env);
     /// AnchorKitContract::initialize(env, admin);
     /// ```
     pub fn initialize(env: Env, admin: Address) {
@@ -1278,10 +1283,7 @@ impl AnchorKitContract {
     /// assert!(initialized);
     /// ```
     pub fn is_initialized(env: Env) -> bool {
-        env.storage()
-            .instance()
-            .get::<_, bool>(&symbol_short!("INITED"))
-            .unwrap_or(false)
+        env.storage().persistent().has(&initialized_key(&env))
     }
 
     /// Retrieve the current admin address.
@@ -1631,6 +1633,16 @@ impl AnchorKitContract {
     /// ```
     pub fn set_cache_config(env: Env, config: CacheConfig) {
         Self::require_admin(&env);
+
+        // Zero TTL values would cause every cache entry to expire immediately,
+        // making the SWR window meaningless and every read a cache miss.
+        if config.metadata_ttl_seconds == 0
+            || config.capabilities_ttl_seconds == 0
+            || config.swr_ttl_seconds == 0
+        {
+            panic_with_error!(&env, ErrorCode::ValidationError);
+        }
+
         env.storage().instance().set(&Self::cache_config_key(&env), &config);
         env.storage().instance().extend_ttl(INSTANCE_TTL, INSTANCE_TTL);
     }
@@ -2049,8 +2061,8 @@ impl AnchorKitContract {
     /// use anchorkit::AnchorKitContract;
     ///
     /// let env = Env::default();
-    /// let attestor = Address::random(&env);
-    /// let issuer = Address::random(&env);
+    /// let attestor = Address::generate(&env);
+    /// let issuer = Address::generate(&env);
     /// let token = String::from_str(&env, "eyJ...");
     /// let pubkey = BytesN::from_array(&env, &[0u8; 32]);
     /// AnchorKitContract::register_attestor(env, attestor, token, issuer, pubkey);
@@ -2124,7 +2136,7 @@ impl AnchorKitContract {
     /// use anchorkit::AnchorKitContract;
     ///
     /// let env = Env::default();
-    /// let attestor = Address::random(&env);
+    /// let attestor = Address::generate(&env);
     /// AnchorKitContract::revoke_attestor(env, attestor);
     /// ```
     pub fn revoke_attestor(env: Env, attestor: Address) {
@@ -2174,7 +2186,7 @@ impl AnchorKitContract {
     /// use anchorkit::AnchorKitContract;
     ///
     /// let env = Env::default();
-    /// let attestor = Address::random(&env);
+    /// let attestor = Address::generate(&env);
     /// let is_registered = AnchorKitContract::is_attestor(env, attestor);
     /// ```
     pub fn is_attestor(env: Env, attestor: Address) -> bool {
@@ -2242,7 +2254,7 @@ impl AnchorKitContract {
     /// use anchorkit::AnchorKitContract;
     ///
     /// let env = Env::default();
-    /// let attestor = Address::random(&env);
+    /// let attestor = Address::generate(&env);
     /// let profile = AnchorKitContract::get_attestor_profile(env, attestor);
     /// println!("Endpoint: {}", profile.endpoint);
     /// ```
@@ -2288,7 +2300,7 @@ impl AnchorKitContract {
     /// use anchorkit::AnchorKitContract;
     ///
     /// let env = Env::default();
-    /// let attestor = Address::random(&env);
+    /// let attestor = Address::generate(&env);
     /// let endpoint = String::from_str(&env, "https://api.example.com");
     /// AnchorKitContract::set_endpoint(env, attestor, endpoint);
     /// ```
@@ -2331,7 +2343,7 @@ impl AnchorKitContract {
     /// use anchorkit::AnchorKitContract;
     ///
     /// let env = Env::default();
-    /// let attestor = Address::random(&env);
+    /// let attestor = Address::generate(&env);
     /// let endpoint = AnchorKitContract::get_endpoint(env, attestor);
     /// ```
     pub fn get_endpoint(env: Env, attestor: Address) -> String {
@@ -2373,7 +2385,7 @@ impl AnchorKitContract {
     /// use anchorkit::AnchorKitContract;
     ///
     /// let env = Env::default();
-    /// let attestor = Address::random(&env);
+    /// let attestor = Address::generate(&env);
     /// let webhook = String::from_str(&env, "https://api.example.com/webhooks");
     /// AnchorKitContract::register_webhook(env, attestor, webhook);
     /// ```
@@ -2419,7 +2431,7 @@ impl AnchorKitContract {
     /// use anchorkit::AnchorKitContract;
     ///
     /// let env = Env::default();
-    /// let attestor = Address::random(&env);
+    /// let attestor = Address::generate(&env);
     /// let webhook = AnchorKitContract::get_webhook_url(env, attestor);
     /// ```
     pub fn get_webhook_url(env: Env, attestor: Address) -> String {
@@ -2470,7 +2482,7 @@ impl AnchorKitContract {
     /// use anchorkit::AnchorKitContract;
     ///
     /// let env = Env::default();
-    /// let anchor = Address::random(&env);
+    /// let anchor = Address::generate(&env);
     /// let services = Vec::from_array(&env, [1u32, 3u32]); // deposits + quotes
     /// AnchorKitContract::configure_services(env, anchor, services);
     /// ```
@@ -2531,7 +2543,7 @@ impl AnchorKitContract {
     /// use anchorkit::AnchorKitContract;
     ///
     /// let env = Env::default();
-    /// let anchor = Address::random(&env);
+    /// let anchor = Address::generate(&env);
     /// let services = Vec::from_array(&env, [1u32, 2u32]); // deposits + withdrawals
     /// AnchorKitContract::configure_services_versioned(env, anchor, services, 1);
     /// ```
@@ -2665,7 +2677,7 @@ impl AnchorKitContract {
     /// use anchorkit::AnchorKitContract;
     ///
     /// let env = Env::default();
-    /// let anchor = Address::random(&env);
+    /// let anchor = Address::generate(&env);
     /// let version = AnchorKitContract::get_service_capability_version(env, anchor);
     /// ```
     pub fn get_service_capability_version(env: Env, anchor: Address) -> u32 {
@@ -2700,7 +2712,7 @@ impl AnchorKitContract {
     /// use anchorkit::AnchorKitContract;
     ///
     /// let env = Env::default();
-    /// let anchor = Address::random(&env);
+    /// let anchor = Address::generate(&env);
     /// let services = AnchorKitContract::get_supported_services(env, anchor);
     /// ```
     pub fn get_supported_services(env: Env, anchor: Address) -> AnchorServices {
@@ -2766,7 +2778,7 @@ impl AnchorKitContract {
     /// use anchorkit::AnchorKitContract;
     ///
     /// let env = Env::default();
-    /// let anchor = Address::random(&env);
+    /// let anchor = Address::generate(&env);
     /// let supports_deposits = AnchorKitContract::supports_service(env, anchor, 1);
     /// ```
     pub fn supports_service(env: Env, anchor: Address, service: u32) -> bool {
@@ -3764,6 +3776,18 @@ impl AnchorKitContract {
         validate_currency_code(&env, &quote_asset);
         validate_fee_percent(&env, fee_percentage);
         validate_amount_limits(&env, minimum_amount, maximum_amount);
+
+        // Reject quotes that are already expired or set in the past.
+        let now = env.ledger().timestamp();
+        if valid_until <= now {
+            panic_with_error!(&env, ErrorCode::InvalidQuote);
+        }
+        // Reject quotes expiring more than 30 days in the future to prevent
+        // unbounded validity windows that make routing unpredictable.
+        const MAX_QUOTE_VALIDITY: u64 = 30 * 24 * 60 * 60;
+        if valid_until.saturating_sub(now) > MAX_QUOTE_VALIDITY {
+            panic_with_error!(&env, ErrorCode::InvalidQuote);
+        }
         let inst = env.storage().instance();
         let qcnt_key = make_storage_key(&env, &[b"QCNT"]);
         let next: u64 = inst.get(&qcnt_key).unwrap_or(0u64) + 1;
@@ -3823,6 +3847,18 @@ impl AnchorKitContract {
         validate_currency_code(&env, &quote_asset);
         validate_fee_percent(&env, fee_percentage);
         validate_amount_limits(&env, minimum_amount, maximum_amount);
+
+        // Reject quotes that are already expired or set in the past.
+        let now = env.ledger().timestamp();
+        if valid_until <= now {
+            panic_with_error!(&env, ErrorCode::InvalidQuote);
+        }
+        // Reject quotes expiring more than 30 days in the future to prevent
+        // unbounded validity windows that make routing unpredictable.
+        const MAX_QUOTE_VALIDITY: u64 = 30 * 24 * 60 * 60;
+        if valid_until.saturating_sub(now) > MAX_QUOTE_VALIDITY {
+            panic_with_error!(&env, ErrorCode::InvalidQuote);
+        }
         let inst = env.storage().instance();
         let qcnt_key = make_storage_key(&env, &[b"QCNT"]);
         let next: u64 = inst.get(&qcnt_key).unwrap_or(0u64) + 1;
@@ -4164,7 +4200,7 @@ impl AnchorKitContract {
         env.storage()
             .persistent()
             .get::<_, AuditLog>(&make_storage_key(&env, &[b"AUDIT", &log_id.to_be_bytes()]))
-            .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::AttestationNotFound))
+            .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::AuditLogNotFound))
     }
 
     pub fn get_session_audit_logs(env: Env, session_id: u64, limit: u64) -> Vec<AuditLog> {
@@ -5535,7 +5571,7 @@ impl AnchorKitContract {
             .storage()
             .persistent()
             .get(&key)
-            .unwrap_or_else(|| panic_with_error!(env, ErrorCode::AttestationNotFound));
+            .unwrap_or_else(|| panic_with_error!(env, ErrorCode::TransactionNotFound));
 
         let from_state = record.state;
         if !from_state.is_valid_transition(new_state) {

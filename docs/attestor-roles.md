@@ -620,7 +620,16 @@ Required roles:
 
 See: `configs/stablecoin-issuer.json`
 
-## Contract-Side Role Enforcement
+## Unified AttestorProfile Storage
+
+All attestor metadata (endpoint, webhook URL, services) is stored in a single `AttestorProfile` struct under the `(symbol_short!("PROFILE"), attestor)` key, rather than separate raw storage keys. This ensures consistency across reads and writes.
+
+**Relevant functions:**
+- `set_endpoint` / `register_webhook` — write to `AttestorProfile` via `save_profile`
+- `get_endpoint` / `get_webhook_url` — read from `AttestorProfile` via `load_or_init_profile`
+- `configure_services_versioned` — syncs services into `AttestorProfile` after storing under `SERVICES` key
+
+**Contract-Side Role Enforcement**
 
 While the configuration defines roles, the actual permission enforcement happens at the contract level. The contract should:
 

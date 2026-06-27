@@ -236,11 +236,12 @@ pub fn is_retryable(code: crate::errors::ErrorCode) -> bool {
 ///
 /// # Examples
 ///
-/// ```rust
-/// use anchorkit::retry::{retry_with_backoff, RetryConfig};
+/// ```rust,no_run
+/// use anchorkit::retry::{retry_with_backoff, MockJitterSource, RetryConfig};
 ///
 /// let config = RetryConfig::default();
 /// let mut calls = 0u32;
+/// let mut js = MockJitterSource::new(vec![0]);
 ///
 /// let result = retry_with_backoff(
 ///     &config,
@@ -250,7 +251,10 @@ pub fn is_retryable(code: crate::errors::ErrorCode) -> bool {
 ///     },
 ///     |_err| true,   // all errors are retryable
 ///     |_ms| {},      // no-op sleep
+///     &mut js,       // jitter source
 /// );
+/// assert_eq!(result, Ok(42u32));
+/// ```
 ///
 /// A `sleep_fn` callback is provided so callers can inject real or mock sleep.
 /// `jitter_source` provides per-attempt seeds to spread retry timing.

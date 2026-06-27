@@ -49,6 +49,9 @@ pub const MOCK_TXN_ID_24: &str = "mock-txn-24-001";
 /// Epoch timestamp used in quote mock responses (2024-01-15 00:00:00 UTC).
 pub const MOCK_EXPIRES_AT: u64 = 1_705_276_800;
 
+/// A known-valid Stellar testnet account address (correct base32 checksum).
+pub const MOCK_ACCOUNT_ID: &str = "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN";
+
 // ── SEP-6 mocks ───────────────────────────────────────────────────────────────
 
 /// Returns a valid [`RawDepositResponse`] suitable for passing to [`initiate_deposit`].
@@ -76,7 +79,7 @@ pub fn mock_deposit_response() -> RawDepositResponse {
 pub fn mock_withdrawal_response() -> RawWithdrawalResponse {
     RawWithdrawalResponse {
         transaction_id: MOCK_TXN_ID.to_string(),
-        account_id: "GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX".to_string(),
+        account_id: MOCK_ACCOUNT_ID.to_string(),
         memo: Some("MOCK-WITHDRAW".to_string()),
         memo_type: Some("text".to_string()),
         min_amount: Some(5),
@@ -257,7 +260,7 @@ pub fn mock_deposit_response_full() -> RawDepositResponse {
 pub fn mock_withdrawal_response_minimal() -> RawWithdrawalResponse {
     RawWithdrawalResponse {
         transaction_id: "withdraw-min-001".to_string(),
-        account_id: "GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX".to_string(),
+        account_id: MOCK_ACCOUNT_ID.to_string(),
         memo: None,
         memo_type: None,
         min_amount: None,
@@ -272,7 +275,7 @@ pub fn mock_withdrawal_response_minimal() -> RawWithdrawalResponse {
 pub fn mock_withdrawal_response_full() -> RawWithdrawalResponse {
     RawWithdrawalResponse {
         transaction_id: "withdraw-full-001".to_string(),
-        account_id: "GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX".to_string(),
+        account_id: MOCK_ACCOUNT_ID.to_string(),
         memo: Some("WITHDRAWMEMO".to_string()),
         memo_type: Some("text".to_string()),
         min_amount: Some(10),

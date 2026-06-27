@@ -27,7 +27,7 @@
 //! |--------|-----|---------|
 //! | [`sep6`] | SEP-6 | Non-interactive deposit / withdrawal |
 //! | [`sep24`] | SEP-24 | Interactive deposit / withdrawal |
-//! | `sep38` (internal) | SEP-38 | Anchor RFQ / firm quotes |
+//! | [`sep38`] | SEP-38 | Anchor RFQ / firm quotes |
 //!
 //! ### Cross-cutting utilities
 //! | Module | Purpose |
@@ -81,11 +81,13 @@
 //!
 //! // 4. Wrap any fallible call with exponential-backoff retry.
 //! let config = RetryConfig::default();
+//! let mut js = anchorkit::retry::MockJitterSource::new(vec![0]);
 //! let result = retry_with_backoff(
 //!     &config,
 //!     |_attempt| -> Result<&str, u32> { Ok("success") },
 //!     |_err| false,
 //!     |_ms| {},
+//!     &mut js,
 //! );
 //! assert_eq!(result, Ok("success"));
 //! ```
