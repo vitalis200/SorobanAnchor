@@ -3708,10 +3708,6 @@ impl AnchorKitContract {
         env.storage().persistent().set(&sess_key, &session);
         env.storage().persistent().extend_ttl(&sess_key, PERSISTENT_TTL, PERSISTENT_TTL);
 
-        let snonce_key = make_storage_key(&env, &[b"SNONCE", &session_id.to_be_bytes()]);
-        env.storage().persistent().set(&snonce_key, &0u64);
-        env.storage().persistent().extend_ttl(&snonce_key, PERSISTENT_TTL, PERSISTENT_TTL);
-
         env.events().publish(
             (symbol_short!("session"), symbol_short!("created"), session_id),
             SessionCreatedEvent { session_id, initiator, timestamp: now },

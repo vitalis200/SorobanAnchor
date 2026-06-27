@@ -52,14 +52,7 @@ pub struct AnchorInfoResponse {
     pub supported_assets: alloc::vec::Vec<alloc::string::String>,
 }
 
-/// A validated transaction status response.
-#[allow(dead_code)]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TransactionStatusResponse {
-    pub transaction_id: alloc::string::String,
-    pub status: alloc::string::String,
-    pub kind: alloc::string::String,
-}
+
 
 /// Validates a raw deposit response map, returning a typed [`DepositResponse`]
 /// or [`Error::validation_error`] if any required field is missing or empty.
@@ -405,45 +398,6 @@ pub fn validate_anchor_info_response(
     Ok(AnchorInfoResponse {
         name: alloc::string::String::from(name),
         supported_assets,
-    })
-}
-
-/// Validates a raw transaction status response, returning a typed [`TransactionStatusResponse`]
-/// or [`Error::validation_error`] if any required field is missing or empty.
-///
-/// # Arguments
-///
-/// * `transaction_id` - Unique transaction ID (must be non-empty).
-/// * `status` - Current transaction status string (must be non-empty).
-/// * `kind` - The type of transaction (e.g., "deposit", "withdrawal"; must be non-empty).
-///
-/// # Returns
-///
-/// A validated [`TransactionStatusResponse`] on success.
-///
-/// # Errors
-///
-/// Returns [`Error`] with code [`ErrorCode::ValidationError`] if any field is empty.
-#[allow(dead_code)]
-pub fn validate_transaction_status_response(
-    transaction_id: &str,
-    status: &str,
-    kind: &str,
-) -> Result<TransactionStatusResponse, Error> {
-    if transaction_id.is_empty() {
-        return Err(Error::validation_error("transaction_id is empty"));
-    }
-    if status.is_empty() {
-        return Err(Error::validation_error("status is empty"));
-    }
-    if kind.is_empty() {
-        return Err(Error::validation_error("kind is empty"));
-    }
-
-    Ok(TransactionStatusResponse {
-        transaction_id: alloc::string::String::from(transaction_id),
-        status: alloc::string::String::from(status),
-        kind: alloc::string::String::from(kind),
     })
 }
 
